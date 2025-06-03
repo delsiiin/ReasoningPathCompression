@@ -2,8 +2,9 @@ from importlib.metadata import version
 import warnings
 import transformers
 
-from transformers.models.llama.modeling_llama import LLAMA_ATTENTION_CLASSES
-from transformers.models.qwen2.modeling_qwen2 import QWEN2_ATTENTION_CLASSES
+# from transformers.models.llama.modeling_llama import LLAMA_ATTENTION_CLASSES
+from rpc.llama_vanilla import LLAMA_ATTENTION_CLASSES
+from rpc.qwen2_vanilla import QWEN2_ATTENTION_CLASSES
 
 from rpc.llama_custom import LlamaRPCAttention
 from rpc.qwen2_custom import Qwen2RPCAttention

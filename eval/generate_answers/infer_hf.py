@@ -15,7 +15,68 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from rpc import enable_rpc, set_rpc_config
 from eval.generate_answers.utils_hf import count_completed_samples, batched_generate
 
-def main():
+import torch.multiprocessing as mp
+
+def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank):
+    
+    device = torch.device(f'cuda:{rank}')
+
+    if rpc:
+        enable_rpc()
+
+    attn_implementation = 'flash_attention_2'
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        attn_implementation=attn_implementation
+    ).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.padding_side = 'left'
+
+    if rpc: 
+        set_rpc_config(model=model,
+                            P=P,
+                            R=R,
+                            c=c,
+                            selectors=selectors,
+                            aggregation=aggregation,
+                            kernel_size=kernel_size,
+                            pooling=pooling,
+                            )
+
+    else:
+        print(f"Full KV Cache Inference")
+
+    for i in tqdm(range(0, len(data), batch_size)):
+
+        batch_dicts = data[i : i + batch_size] 
+
+        processing = len(batch_dicts)
+        print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
+        print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
+        
+        batched_generate(
+            model=model,
+            tokenizer=tokenizer,
+            output_file=output_file,
+            batch_dicts=batch_dicts,
+            batch_size=batch_size,
+            max_new_tokens=32768,
+            temperature=0.6,
+            top_p=0.95,
+            top_k=top_k,
+        )
+
+        total_tasks -= processing
+
+
+
+if __name__ == "__main__":
+
+    mp.set_start_method('spawn', force=True)
+
     parser = argparse.ArgumentParser(description="Run inference on model with prompts from a jsonl file")
     parser.add_argument("--input_file", type=str, required=True, help="Input jsonl file path")
     parser.add_argument("--output_file", type=str, required=True, help="Output file path")
@@ -32,7 +93,6 @@ def main():
     parser.add_argument("--pooling", type=str, default='avgpool', help="Type of local pooling")
     args = parser.parse_args()
 
-    attn_implementation = 'flash_attention_2'
     if 'qwq' in args.model_path.lower():
         top_k = 40
     else:
@@ -66,58 +126,19 @@ def main():
     total_tasks = len(expanded_data)
     print(f"Total remaining samples to process: {total_tasks}")
 
-    
-    if args.rpc:
-        enable_rpc()
+    world_size = torch.cuda.device_count()
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        low_cpu_mem_usage=True,
-        attn_implementation=attn_implementation
-    )
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-    tokenizer.padding_side = 'left'
+    data_subsets = [expanded_data[i::world_size] for i in range(world_size)]
 
-    if args.rpc: 
-        set_rpc_config(model=model,
-                            P=args.P,
-                            R=args.R,
-                            c=args.c,
-                            selectors=args.selectors,
-                            aggregation=args.aggregation,
-                            kernel_size=args.kernel_size,
-                            pooling=args.pooling,
-                            )
+    processes = []
+    for rank in range(world_size):
+        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank))
 
-    else:
-        print(f"Full KV Cache Inference")
+        p.start()
 
-    for i in tqdm(range(0, len(expanded_data), args.batch_size)):
+        processes.append(p)
 
-        batch_dicts = expanded_data[i : i + args.batch_size] 
-
-        processing = len(batch_dicts)
-        print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
-        print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
-        
-        batched_generate(
-            model=model,
-            tokenizer=tokenizer,
-            output_file=args.output_file,
-            batch_dicts=batch_dicts,
-            batch_size=args.batch_size,
-            max_new_tokens=32768,
-            temperature=0.6,
-            top_p=0.95,
-            top_k=top_k
-        )
-
-        total_tasks -= processing
-
-
-if __name__ == "__main__":
-    main()
+    for p in processes:
+        p.join()
 
     

@@ -1,8 +1,9 @@
 # "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 # "Qwen/QwQ/-32B"
+# "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
 
-MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
-MODEL_NICKNAME=r1-7b # qwq
+MODEL=/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B
+MODEL_NICKNAME=r1-1.5b # qwq
 N_SAMPLES=8
 BSZ=8
 

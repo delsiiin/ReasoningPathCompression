@@ -5,18 +5,22 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, TextStreamer
 import transformers
 
+from rpc.llama_vanilla import LlamaForCausalLM
+from rpc.qwen2_vanilla import Qwen2ForCausalLM
+
 from rpc import enable_rpc, set_rpc_config
 from utils.apply_chat_template import apply_chat_template
 
 # "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 # "Qwen/QwQ/-32B"
+# "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
 
 
-def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B",
             rpc: bool = True,
             max_new_tokens: int = 32768,
             # RPC arguments
-            P=1024,
+            P=4096,
             R=32,
             c=4,
             selectors='recent',
@@ -34,13 +38,22 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     if rpc:
         enable_rpc()
     
-    model = AutoModelForCausalLM.from_pretrained(
-    model_path,
-    torch_dtype=torch.bfloat16,
-    device_map="auto",
-    low_cpu_mem_usage=True,
-    attn_implementation=attn_implementation
-    )
+    if "qwen" in model_path.lower():
+        model = Qwen2ForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            attn_implementation=attn_implementation
+        )
+    elif "llama" in model_path.lower():
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            attn_implementation=attn_implementation
+        )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     streamer = TextStreamer(tokenizer)
 
@@ -81,5 +94,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
 
 
 if __name__ == '__main__':
+    
+    set_seed(42)
     
     fire.Fire(gen_example)    
