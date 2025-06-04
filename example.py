@@ -11,12 +11,21 @@ from rpc.qwen2_vanilla import Qwen2ForCausalLM
 from rpc import enable_rpc, set_rpc_config
 from utils.apply_chat_template import apply_chat_template
 
-# "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+# "/home/yangx/DeepSeek-R1-Distill-Qwen-7B"
 # "Qwen/QwQ/-32B"
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
+# "/home/yangx/DeepSeek-R1-Distill-Llama-8B"
+# "/home/yangx/Llama-3.1-8B-Instruct"
 
+# Heatmap Prompt
 
-def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B",
+# R1-llama-8B
+# A deep-sea monster rises from the waters once every hundred years to feast on a ship and sate its hunger. Over three hundred years, it has consumed 847 people. Ships have been built larger over time, so each new ship has twice as many people as the last ship. How many people were on the ship the monster ate in the first hundred years?
+
+# R1-qwen-7B
+# Ralph is going to practice playing tennis with a tennis ball machine that shoots out tennis balls for Ralph to hit. He loads up the machine with 175 tennis balls to start with. Out of the first 100 balls, he manages to hit 2/5 of them. Of the next 75 tennis balls, he manages to hit 1/3 of them. Out of all the tennis balls, how many did Ralph not hit?
+
+def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
             rpc: bool = True,
             max_new_tokens: int = 32768,
             # RPC arguments
@@ -25,9 +34,10 @@ def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B",
             c=4,
             selectors='recent',
             aggregation='all',
+            mode=None,
             ):
 
-    attn_implementation = 'flash_attention_2'
+    attn_implementation = 'eager'
     if 'qwq' in model_path.lower():
         top_k = 40
     else:
@@ -39,20 +49,34 @@ def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B",
         enable_rpc()
     
     if "qwen" in model_path.lower():
+        from rpc.qwen2_config import Qwen2Config
+
+        config = Qwen2Config.from_pretrained(model_path)
+
+        config.update({'mode':mode})
+
         model = Qwen2ForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             device_map="auto",
             low_cpu_mem_usage=True,
-            attn_implementation=attn_implementation
+            attn_implementation=attn_implementation,
+            config=config
         )
     elif "llama" in model_path.lower():
+        from rpc.llama_config import LlamaConfig
+
+        config = LlamaConfig.from_pretrained(model_path)
+
+        config.update({'mode':mode})
+
         model = LlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             device_map="auto",
             low_cpu_mem_usage=True,
-            attn_implementation=attn_implementation
+            attn_implementation=attn_implementation,
+            config=config
         )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     streamer = TextStreamer(tokenizer)
