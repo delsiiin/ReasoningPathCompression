@@ -172,7 +172,8 @@ if __name__ == "__main__":
                 expanded_data.append(copy.deepcopy(item))
     elif task == "gpqa":
         for item in data['questions']:
-            prompt = format_gpqa_question(item)
+            item['question'] = format_gpqa_question(item)
+            prompt = item['question']
             completed = completed_counts.get(prompt, 0)
             remaining = max(args.n_samples - completed, 0)
             for _ in range(remaining):
