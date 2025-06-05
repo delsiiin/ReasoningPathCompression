@@ -18,6 +18,24 @@ from eval.generate_answers.utils_hf import count_completed_samples, batched_gene
 import torch.multiprocessing as mp
 from datasets import load_dataset
 
+def format_gpqa_question(question_data):
+    try:
+        prompt = f"""Please solve this multiple choice question. 
+
+Question: {question_data['question']}
+
+Options:
+A: {question_data['options']['A']}
+B: {question_data['options']['B']}
+C: {question_data['options']['C']}
+D: {question_data['options']['D']}
+
+Please provide your answer in the format 'ANSWER: X' where X is A, B, C, or D."""
+        return prompt
+    except Exception as e:
+        print(f"Error formatting question: {e}", "red")
+        return None
+
 def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task):
     
     device = torch.device(f'cuda:{rank}')
@@ -80,7 +98,6 @@ if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
 
     parser = argparse.ArgumentParser(description="Run inference on model with prompts from a jsonl file")
-    parser.add_argument("--input_file", type=str, required=True, help="Input jsonl file path")
     parser.add_argument("--output_file", type=str, required=True, help="Output file path")
     parser.add_argument("--n_samples", type=int, default=64, help="Number of samples per prompt")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch per single call")
@@ -110,6 +127,8 @@ if __name__ == "__main__":
         task = "gsm8k"
     elif "math500" in args.data_path.lower():
         task = "math500"
+    elif "gpqa" in args.data_path.lower():
+        task = "gpqa"
 
     if os.path.exists(args.output_file):
         completed_counts = count_completed_samples(args.output_file, task)
@@ -123,9 +142,11 @@ if __name__ == "__main__":
             completed_counts = dict()
     
     # Load dataset
-    # with open(args.input_file, 'r', encoding='utf-8') as f:
-    #     data = [json.loads(l) for l in f]
-    data = load_dataset(args.data_path)
+    if task == "gpqa":
+        with open(args.data_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    else:
+        data = load_dataset(args.data_path)
 
     expanded_data = []
     if task == "aime":
@@ -145,6 +166,13 @@ if __name__ == "__main__":
     elif task == "math500":
         for item in data['test']:
             prompt = item['problem']
+            completed = completed_counts.get(prompt, 0)
+            remaining = max(args.n_samples - completed, 0)
+            for _ in range(remaining):
+                expanded_data.append(copy.deepcopy(item))
+    elif task == "gpqa":
+        for item in data['questions']:
+            prompt = format_gpqa_question(item)
             completed = completed_counts.get(prompt, 0)
             remaining = max(args.n_samples - completed, 0)
             for _ in range(remaining):

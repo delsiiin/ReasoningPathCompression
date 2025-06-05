@@ -14,7 +14,7 @@ def count_completed_samples(output_file, task):
                     item = json.loads(line)
                     if task == "aime" or task == "math500":
                         prompt = item['problem']
-                    elif task == "gsm8k":
+                    elif task == "gsm8k" or task == "gpqa":
                         prompt = item['question']
                     gen_count = len(item.get('gen', []))
                     prompt_counts[prompt] += gen_count
@@ -36,7 +36,7 @@ def batched_generate(
 ):   
     if task == "aime" or task == "math500":
         template_prompts = [apply_chat_template(tokenizer, d['problem']) for d in batch_dicts]
-    elif task == "gsm8k":
+    elif task == "gsm8k" or task == "gpqa":
         template_prompts = [apply_chat_template(tokenizer, d['question']) for d in batch_dicts]
     inputs = tokenizer(template_prompts, padding=True, return_tensors="pt").to(model.device)
     input_length = inputs.input_ids.shape[-1]
