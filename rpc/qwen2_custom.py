@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Union
 import warnings
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.qwen2.modeling_qwen2 import (
+from .qwen2_vanilla import (
     apply_rotary_pos_emb,
     repeat_kv,
     Qwen2FlashAttention2

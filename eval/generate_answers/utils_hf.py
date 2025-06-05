@@ -5,14 +5,17 @@ import collections
 
 from utils.apply_chat_template import apply_chat_template
 
-def count_completed_samples(output_file):
+def count_completed_samples(output_file, task):
     prompt_counts = collections.defaultdict(int)
     if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
         with open(output_file, 'r', encoding='utf-8') as f:
             for line in f:
                 try:
                     item = json.loads(line)
-                    prompt = item['prompt']
+                    if task == "aime" or task == "math500":
+                        prompt = item['problem']
+                    elif task == "gsm8k":
+                        prompt = item['question']
                     gen_count = len(item.get('gen', []))
                     prompt_counts[prompt] += gen_count
                 except json.JSONDecodeError:
@@ -29,9 +32,12 @@ def batched_generate(
     temperature: float = 0.6,
     top_p: float = 0.95,
     top_k: int = 40,
+    task=None
 ):   
-
-    template_prompts = [apply_chat_template(tokenizer, d['prompt']) for d in batch_dicts]
+    if task == "aime" or task == "math500":
+        template_prompts = [apply_chat_template(tokenizer, d['problem']) for d in batch_dicts]
+    elif task == "gsm8k":
+        template_prompts = [apply_chat_template(tokenizer, d['question']) for d in batch_dicts]
     inputs = tokenizer(template_prompts, padding=True, return_tensors="pt").to(model.device)
     input_length = inputs.input_ids.shape[-1]
 

@@ -16,8 +16,9 @@ from rpc import enable_rpc, set_rpc_config
 from eval.generate_answers.utils_hf import count_completed_samples, batched_generate
 
 import torch.multiprocessing as mp
+from datasets import load_dataset
 
-def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank):
+def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task):
     
     device = torch.device(f'cuda:{rank}')
 
@@ -67,6 +68,7 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
             temperature=0.6,
             top_p=0.95,
             top_k=top_k,
+            task=task
         )
 
         total_tasks -= processing
@@ -91,6 +93,8 @@ if __name__ == "__main__":
     parser.add_argument("--aggregation", type=str, default='group', help="Aggregation policy")
     parser.add_argument("--kernel_size", type=int, default=7, help="Local pooling size")
     parser.add_argument("--pooling", type=str, default='avgpool', help="Type of local pooling")
+
+    parser.add_argument("--data_path", type=str, required=True, help="Data path")
     args = parser.parse_args()
 
     if 'qwq' in args.model_path.lower():
@@ -100,8 +104,15 @@ if __name__ == "__main__":
 
     print(f"Using Model: {args.model_path}, therefore top_k={top_k}")
 
+    if "aime" in args.data_path.lower():
+        task = "aime"
+    elif "gsm8k" in args.data_path.lower():
+        task = "gsm8k"
+    elif "math500" in args.data_path.lower():
+        task = "math500"
+
     if os.path.exists(args.output_file):
-        completed_counts = count_completed_samples(args.output_file)
+        completed_counts = count_completed_samples(args.output_file, task)
         total_completed = sum(completed_counts.values())
         print(f"Found {total_completed} completed samples from previous run")
     else:
@@ -112,16 +123,32 @@ if __name__ == "__main__":
             completed_counts = dict()
     
     # Load dataset
-    with open(args.input_file, 'r', encoding='utf-8') as f:
-        data = [json.loads(l) for l in f]
+    # with open(args.input_file, 'r', encoding='utf-8') as f:
+    #     data = [json.loads(l) for l in f]
+    data = load_dataset(args.data_path)
 
     expanded_data = []
-    for item in data:
-        prompt = item['prompt']
-        completed = completed_counts.get(prompt, 0)
-        remaining = max(args.n_samples - completed, 0)
-        for _ in range(remaining):
-            expanded_data.append(copy.deepcopy(item))
+    if task == "aime":
+        for item in data['train']:
+            prompt = item['problem']
+            completed = completed_counts.get(prompt, 0)
+            remaining = max(args.n_samples - completed, 0)
+            for _ in range(remaining):
+                expanded_data.append(copy.deepcopy(item))
+    elif task == "gsm8k":
+        for item in data['train']:
+            prompt = item['question']
+            completed = completed_counts.get(prompt, 0)
+            remaining = max(args.n_samples - completed, 0)
+            for _ in range(remaining):
+                expanded_data.append(copy.deepcopy(item))
+    elif task == "math500":
+        for item in data['test']:
+            prompt = item['problem']
+            completed = completed_counts.get(prompt, 0)
+            remaining = max(args.n_samples - completed, 0)
+            for _ in range(remaining):
+                expanded_data.append(copy.deepcopy(item))
     
     total_tasks = len(expanded_data)
     print(f"Total remaining samples to process: {total_tasks}")
@@ -132,7 +159,7 @@ if __name__ == "__main__":
 
     processes = []
     for rank in range(world_size):
-        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank))
+        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task))
 
         p.start()
 
