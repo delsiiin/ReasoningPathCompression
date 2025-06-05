@@ -10,7 +10,7 @@ import threading
 from datetime import datetime
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 from rpc import enable_rpc, set_rpc_config
 from eval.generate_answers.utils_hf import count_completed_samples, batched_generate
@@ -95,6 +95,8 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
 
 if __name__ == "__main__":
 
+    set_seed(42)
+
     mp.set_start_method('spawn', force=True)
 
     parser = argparse.ArgumentParser(description="Run inference on model with prompts from a jsonl file")
@@ -157,7 +159,8 @@ if __name__ == "__main__":
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
     elif task == "gsm8k":
-        for item in data['train']:
+        data = data['train'].select(range(600))
+        for item in data:
             prompt = item['question']
             completed = completed_counts.get(prompt, 0)
             remaining = max(args.n_samples - completed, 0)
