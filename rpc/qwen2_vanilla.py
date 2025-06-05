@@ -394,7 +394,7 @@ class Qwen2Attention(nn.Module):
             
                 save_tgt = torch.load(save_path)
 
-                zeros = torch.zeros(q_len, 548-kv_len, device=attn_weights.device, dtype=attn_weights.dtype)
+                zeros = torch.zeros(q_len, 838-kv_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
 
                 cur_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
 
@@ -405,7 +405,7 @@ class Qwen2Attention(nn.Module):
 
             elif q_len != 1:
 
-                zeros = torch.zeros(q_len, 548-q_len, device=attn_weights.device, dtype=attn_weights.dtype)
+                zeros = torch.zeros(q_len, 838-q_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
 
                 save_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
 

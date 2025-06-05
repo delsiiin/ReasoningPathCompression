@@ -12,7 +12,7 @@ from rpc import enable_rpc, set_rpc_config
 from utils.apply_chat_template import apply_chat_template
 
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-7B"
-# "Qwen/QwQ/-32B"
+# "/home/yangx/QwQ-32B"
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
 # "/home/yangx/DeepSeek-R1-Distill-Llama-8B"
 # "/home/yangx/Llama-3.1-8B-Instruct"
@@ -25,7 +25,10 @@ from utils.apply_chat_template import apply_chat_template
 # R1-qwen-7B
 # Ralph is going to practice playing tennis with a tennis ball machine that shoots out tennis balls for Ralph to hit. He loads up the machine with 175 tennis balls to start with. Out of the first 100 balls, he manages to hit 2/5 of them. Of the next 75 tennis balls, he manages to hit 1/3 of them. Out of all the tennis balls, how many did Ralph not hit?
 
-def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
+# QwQ 32B
+# Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?
+
+def gen_example(model_path: str = "/home/yangx/QwQ-32B",
             rpc: bool = True,
             max_new_tokens: int = 32768,
             # RPC arguments
@@ -48,7 +51,7 @@ def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
     if rpc:
         enable_rpc()
     
-    if "qwen" in model_path.lower():
+    if "qwen" in model_path.lower() or "qwq" in model_path.lower():
         from rpc.qwen2_config import Qwen2Config
 
         config = Qwen2Config.from_pretrained(model_path)
