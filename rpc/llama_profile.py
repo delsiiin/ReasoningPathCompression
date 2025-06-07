@@ -188,7 +188,7 @@ def LlamaModel_get_attention_matrix_log(self, take_abs=False, aggregating_block_
     effect = effect.view(bsz, cot_len, n_layers).softmax(-1).sum(1, keepdim=True)
 
     # if the attention matrix is larger than 4k, flush the cache
-    if max_length >= 4096:
+    if total_len >= 4096:
         deepspeed.get_accelerator().empty_cache()
 
     return {'sum_effect': effect}

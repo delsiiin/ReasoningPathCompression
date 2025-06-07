@@ -136,14 +136,14 @@ def Grad_Collect(model, tokenizer, args, data=None, task=None):
         for key in attention_record_keys:
             if args.gradient_abs:
                 if key in model.model.attention_matrix_log:
-                    model.model.attention_matrix_log[key][0] = model.model.attention_matrix_log[key][0] + torch.abs(log[key])
+                    model.model.attention_matrix_log[key][0] = torch.cat([model.model.attention_matrix_log[key][0], torch.abs(log[key])], dim=1)
                 else:
                     # called the first time
                     model.model.attention_matrix_log[key].append(torch.abs(log[key]))
                     print("the shape of the logged {} is {}".format(key, model.model.attention_matrix_log[key][0].shape))
             else:
                 if key in model.model.attention_matrix_log:
-                    model.model.attention_matrix_log[key][0] = model.model.attention_matrix_log[key][0] + log[key]
+                    model.model.attention_matrix_log[key][0] = torch.cat([model.model.attention_matrix_log[key][0], log[key]], dim=1)
                 else:
                     # called the first time
                     model.model.attention_matrix_log[key].append(log[key])
@@ -155,7 +155,7 @@ def Grad_Collect(model, tokenizer, args, data=None, task=None):
 
     key = 'sum_effect'
     # key = 'grad'
-    grad_Attn_tensor = torch.sum(model.model.attention_matrix_log[key][0], dim=0) / num_data
+    grad_Attn_tensor = torch.sum(model.model.attention_matrix_log[key][0], dim=1) / num_data
 
     for key, value in grad_W_dict.items():
         grad_W_dict[key] = value / num_data
