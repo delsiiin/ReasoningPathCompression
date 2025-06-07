@@ -162,7 +162,7 @@ def LlamaModel_get_attention_matrix_log(self, take_abs=False, aggregating_block_
         if take_abs:
             effect = torch.abs(effect)
 
-        effect = effect[..., ques_len:-ans_len, ques_len:-ans_len]
+        effect = effect[..., ques_len:-ans_len, ques_len:-ans_len].mean(1).sum(1) # head-level average column sum (GQA compatible)
 
         # if aggregating_block_size > 1:
         #     assert effect.shape[-1] % aggregating_block_size == 0, "the attention matrix size must be divisible by the aggerating block size"
@@ -181,6 +181,10 @@ def LlamaModel_get_attention_matrix_log(self, take_abs=False, aggregating_block_
     
     effect = torch.stack(effect_list, dim=1)
     
+    bsz, n_layers, cot_len = effect.size()
+
+    effect = effect.view(bsz, cot_len, n_layers).softmax(-1).sum(1, keepdim=True)
+
     # if the attention matrix is larger than 4k, flush the cache
     # if max_length >= 4096:
     #     deepspeed.get_accelerator().empty_cache()
