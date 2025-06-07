@@ -50,11 +50,13 @@ if __name__ == "__main__":
 
     # 绘制折线图
     plt.figure(figsize=(10, 6))
-    plt.plot(ca_ratios, marker='o', markersize=2)
+    plt.plot(ca_ratios, marker='o', markersize=2, label='ca_ratio')
+    plt.axhline(y=avg_ca_ratio, color='red', linestyle='--', label=f'Avg: {avg_ca_ratio:.2f}')
     plt.title("CoT-to-Answer Ratio")
     plt.xlabel("Sample")
     plt.ylabel("ca_ratio")
     plt.grid(True)
+    plt.legend()
     plt.tight_layout()
     plt.show()
     plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/{task}_ca_ratio.pdf")
