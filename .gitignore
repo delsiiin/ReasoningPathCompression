@@ -4,3 +4,4 @@ eval/outputs
 attn_heat_map/
 datasets/
 eval/profile/ca_ratios/
+eval/profile/grad_dir/
