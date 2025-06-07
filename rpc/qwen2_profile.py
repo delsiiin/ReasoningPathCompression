@@ -123,7 +123,7 @@ def Qwen2Attention_grad_analysis_forward(
 
     return attn_output, None, past_key_value
 
-# import deepspeed
+import deepspeed
 # from MoA.attention.pattern import gen_causal_pattern
 
 def Qwen2Model_get_attention_matrix_log(self, take_abs=False, aggregating_block_size=1, ques_len=None, ans_len=None):
@@ -159,6 +159,8 @@ def Qwen2Model_get_attention_matrix_log(self, take_abs=False, aggregating_block_
 
         effect = grad_A
 
+        total_len = effect.shape[-1]
+
         if take_abs:
             effect = torch.abs(effect)
 
@@ -186,8 +188,8 @@ def Qwen2Model_get_attention_matrix_log(self, take_abs=False, aggregating_block_
     effect = effect.view(bsz, cot_len, n_layers).softmax(-1).sum(1, keepdim=True)
     
     # if the attention matrix is larger than 4k, flush the cache
-    # if max_length >= 4096:
-    #     deepspeed.get_accelerator().empty_cache()
+    if total_len >= 4096:
+        deepspeed.get_accelerator().empty_cache()
 
     return {'sum_effect': effect}
 
