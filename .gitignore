@@ -3,3 +3,4 @@ eval/eval_res
 eval/outputs
 attn_heat_map/
 datasets/
+eval/profile/*.pdf
