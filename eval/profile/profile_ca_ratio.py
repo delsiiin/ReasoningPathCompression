@@ -59,4 +59,4 @@ if __name__ == "__main__":
     plt.legend()
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/{task}_ca_ratio.pdf")
+    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{task}_ca_ratio.pdf")
