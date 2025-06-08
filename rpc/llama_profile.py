@@ -185,7 +185,13 @@ def LlamaModel_get_attention_matrix_log(self, take_abs=False, aggregating_block_
     
     bsz, n_layers, cot_len = effect.size()
 
-    effect = effect.view(bsz, cot_len, n_layers).softmax(-1).sum(1, keepdim=True)
+    effect = effect.view(bsz, cot_len, n_layers).sum(1, keepdim=True)
+
+    min_val = torch.min(effect).item()
+
+    min_val = round(min_val, 1)
+
+    effect = effect - min_val
 
     # if the attention matrix is larger than 4k, flush the cache
     if total_len >= 4096:

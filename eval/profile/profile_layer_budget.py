@@ -155,7 +155,7 @@ def Grad_Collect(model, tokenizer, args, data=None, task=None):
 
     key = 'sum_effect'
     # key = 'grad'
-    grad_Attn_tensor = torch.sum(model.model.attention_matrix_log[key][0], dim=1) / num_data
+    grad_Attn_tensor = torch.mean(model.model.attention_matrix_log[key][0], dim=1)
 
     for key, value in grad_W_dict.items():
         grad_W_dict[key] = value / num_data
