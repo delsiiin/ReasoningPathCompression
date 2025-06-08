@@ -14,6 +14,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run profiling on CoT to answer ratio")
     parser.add_argument("--data_path", type=str, required=True, help="Data path")
+    parser.add_argument("--model", type=str, required=True, help="Model name")
     args = parser.parse_args()
 
     if "aime" in args.data_path.lower():
@@ -59,4 +60,4 @@ if __name__ == "__main__":
     plt.legend()
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{task}_ca_ratio.pdf")
+    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}_ca_ratio.pdf")

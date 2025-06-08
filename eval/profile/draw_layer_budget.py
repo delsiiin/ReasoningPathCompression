@@ -7,6 +7,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run profiling on layer budget")
     parser.add_argument("--grad_path", type=str, required=True, help="Grad path")
+    parser.add_argument("--model", type=str, required=True, help="Model name")
     args = parser.parse_args()
 
     if "aime" in args.grad_path.lower():
@@ -19,8 +20,7 @@ if __name__ == "__main__":
         task = "gpqa"
 
     # 1. 加载 .pt 文件
-    tensor_path = f'/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/r1-7b/{task}/grad_attn_tensor_{task}.pt'  # 替换为你的文件路径
-    tensor = torch.load(tensor_path)
+    tensor = torch.load(args.grad_path)
 
     min_val = torch.min(tensor).item()
 
@@ -44,4 +44,4 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/r1-7b/{task}/layer_budget.pdf")
+    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/{args.model}/{task}/layer_budget.pdf")
