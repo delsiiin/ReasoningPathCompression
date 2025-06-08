@@ -12,7 +12,7 @@ import re
 
 if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Run inference on model with prompts from a jsonl file")
+    parser = argparse.ArgumentParser(description="Run profiling on CoT to answer ratio")
     parser.add_argument("--data_path", type=str, required=True, help="Data path")
     args = parser.parse_args()
 

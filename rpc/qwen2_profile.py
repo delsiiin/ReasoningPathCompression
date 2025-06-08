@@ -185,7 +185,9 @@ def Qwen2Model_get_attention_matrix_log(self, take_abs=False, aggregating_block_
 
     bsz, n_layers, cot_len = effect.size()
 
-    effect = effect.view(bsz, cot_len, n_layers).sum(1, keepdim=True)
+    effect = effect.view(bsz, cot_len, n_layers).norm(p=2, dim=1, keepdim=True) # L2 Norm
+
+    # effect = effect.view(bsz, cot_len, n_layers).sum(1, keepdim=True)
 
     min_val = torch.min(effect).item()
 

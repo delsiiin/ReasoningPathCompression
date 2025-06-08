@@ -1,35 +1,47 @@
 import torch
 import matplotlib.pyplot as plt
 
-# 1. 加载 .pt 文件
-tensor_path = '/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/r1-7b/gsm8k/grad_attn_tensor_gsm8k.pt'  # 替换为你的文件路径
-tensor = torch.load(tensor_path)
+import argparse
 
-min_val = torch.min(tensor).item()
+if __name__ == "__main__":
 
-min_val = round(min_val, 2)
+    parser = argparse.ArgumentParser(description="Run profiling on layer budget")
+    parser.add_argument("--grad_path", type=str, required=True, help="Grad path")
+    args = parser.parse_args()
 
-tensor = tensor - min_val
+    if "aime" in args.grad_path.lower():
+        task = "aime"
+    elif "gsm8k" in args.grad_path.lower():
+        task = "gsm8k"
+    elif "math500" in args.grad_path.lower():
+        task = "math500"
+    elif "gpqa" in args.grad_path.lower():
+        task = "gpqa"
 
-# tensor = tensor.softmax(-1)
+    # 1. 加载 .pt 文件
+    tensor_path = f'/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/r1-7b/{task}/grad_attn_tensor_{task}.pt'  # 替换为你的文件路径
+    tensor = torch.load(tensor_path)
 
-tensor = tensor / tensor.sum(1).item()
+    min_val = torch.min(tensor).item()
 
+    min_val = round(min_val, 2)
 
-# 2. 检查形状是否为 (1, 28)
-if tensor.shape != (1, 28):
-    raise ValueError(f"预期张量形状为 (1, 28)，但实际为 {tensor.shape}")
+    tensor = tensor - min_val
 
-# 3. 提取数据并转换为一维列表
-data = tensor.squeeze().tolist()  # 去除 batch 维，转换为 [28]
+    # tensor = tensor.softmax(-1)
 
-# 4. 绘制折线图
-plt.figure(figsize=(10, 4))
-plt.plot(range(28), data, marker='o', linestyle='-')
-plt.title('Tensor Values Line Plot')
-plt.xlabel('Index')
-plt.ylabel('Value')
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-plt.savefig("/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/r1-7b/gsm8k/layer_budget.pdf")
+    tensor = tensor / tensor.sum(1).item()
+
+    # 3. 提取数据并转换为一维列表
+    data = tensor.squeeze().tolist() 
+
+    # 4. 绘制折线图
+    plt.figure(figsize=(10, 4))
+    plt.plot(range(28), data, marker='o', linestyle='-')
+    plt.title('Layer Budget')
+    plt.xlabel('Layer ID')
+    plt.ylabel('Mean L2 Norm')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/r1-7b/{task}/layer_budget.pdf")
