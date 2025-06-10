@@ -18,6 +18,8 @@ from rpc.llama_vanilla import LlamaForCausalLM
 from rpc.qwen2_config import Qwen2Config
 from rpc.qwen2_vanilla import Qwen2ForCausalLM
 
+from eval.generate_answers.utils_hf import BBH_INSTRUCTIONS
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
@@ -68,6 +70,11 @@ def Grad_Collect(model, tokenizer, args, data=None, task=None):
             Ques = tokenizer(data_sample["problem"], return_tensors='pt')['input_ids'].size(-1)
             AnS = tokenizer(data_sample["gen"][0][-ans:], return_tensors='pt')['input_ids'].size(-1)
             data_sample = data_sample["problem"] + data_sample["gen"][0]
+        elif task == "bbh":
+            question = BBH_INSTRUCTIONS[args.bbh_subset] + "\nQ: " + data_sample['input'] + "\nA: Let's think step by step."
+            Ques = tokenizer(question, return_tensors='pt')['input_ids'].size(-1)
+            AnS = tokenizer(data_sample["gen"][0][-ans:], return_tensors='pt')['input_ids'].size(-1)
+            data_sample = question + data_sample["gen"][0]
 
         tokenizer_output = tokenizer(data_sample, return_tensors='pt')
         data_sample = tokenizer_output['input_ids']
@@ -176,6 +183,7 @@ parser.add_argument('--model_name', type=str, default='lmsys/vicuna-13b-v1.5-16k
 parser.add_argument('--tokenizer_name', type=str, default=None)
 parser.add_argument('--grad_dir', type=str, help='directory to save grad')
 parser.add_argument('--data_path', type=str, help='dataset directory')
+parser.add_argument("--bbh_subset", type=str, required=True, help="BBH task type")
 parser.add_argument('--data_range', nargs='+', type=int, default=None, help='data range')
 parser.add_argument('--gradient_abs', action='store_true', help='whether to use absolute value for each gradient')
 parser.add_argument('--weight_gradient', action='store_true', help='whether to collect gradient of weight')
@@ -238,6 +246,8 @@ if __name__ == '__main__':
         task = "math500"
     elif "gpqa" in args.data_path.lower():
         task = "gpqa"
+    elif "bbh" in args.data_path.lower():
+        task = "bbh"
 
     # Load dataset
     with open(args.data_path, 'r', encoding='utf-8') as f:

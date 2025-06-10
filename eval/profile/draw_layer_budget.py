@@ -18,6 +18,8 @@ if __name__ == "__main__":
         task = "math500"
     elif "gpqa" in args.grad_path.lower():
         task = "gpqa"
+    elif "bbh" in args.grad_path.lower():
+        task = "bbh"
 
     # 1. 加载 .pt 文件
     tensor = torch.load(args.grad_path)
