@@ -56,7 +56,10 @@ if __name__ == "__main__":
         task = "math500"
     elif "gpqa" in args.data_path.lower():
         task = "gpqa"
-    
+    elif "bbh" in args.data_path.lower():
+        task = "bbh"
+
+
     # Load dataset
     with open(args.data_path, 'r', encoding='utf-8') as f:
         data = [json.loads(l) for l in f]

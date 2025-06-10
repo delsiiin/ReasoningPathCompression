@@ -18,23 +18,7 @@ from eval.generate_answers.utils_hf import count_completed_samples, batched_gene
 import torch.multiprocessing as mp
 from datasets import load_dataset
 
-def format_gpqa_question(question_data):
-    try:
-        prompt = f"""Please solve this multiple choice question. 
-
-Question: {question_data['question']}
-
-Options:
-A: {question_data['options']['A']}
-B: {question_data['options']['B']}
-C: {question_data['options']['C']}
-D: {question_data['options']['D']}
-
-Please provide your answer in the format 'ANSWER: X' where X is A, B, C, or D."""
-        return prompt
-    except Exception as e:
-        print(f"Error formatting question: {e}", "red")
-        return None
+from eval.generate_answers.utils_hf import format_gpqa_question
 
 def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task):
     
@@ -114,6 +98,7 @@ if __name__ == "__main__":
     parser.add_argument("--pooling", type=str, default='avgpool', help="Type of local pooling")
 
     parser.add_argument("--data_path", type=str, required=True, help="Data path")
+    parser.add_argument("--bbh_subset", type=str, required=True, help="BBH task type")
     args = parser.parse_args()
 
     if 'qwq' in args.model_path.lower():
@@ -131,6 +116,8 @@ if __name__ == "__main__":
         task = "math500"
     elif "gpqa" in args.data_path.lower():
         task = "gpqa"
+    elif "bbh" in args.data_path.lower():
+        task = "bbh"
 
     if os.path.exists(args.output_file):
         completed_counts = count_completed_samples(args.output_file, task)
@@ -147,6 +134,8 @@ if __name__ == "__main__":
     if task == "gpqa":
         with open(args.data_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+    elif task == "bbh":
+        data = load_dataset(args.data_path, args.bbh_subset)
     else:
         data = load_dataset(args.data_path)
 
@@ -181,6 +170,14 @@ if __name__ == "__main__":
             remaining = max(args.n_samples - completed, 0)
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
+    elif task == "bbh":
+        for item in data['test']:
+            prompt = item['input']
+            completed = completed_counts.get(prompt, 0)
+            remaining = max(args.n_samples - completed, 0)
+            for _ in range(remaining):
+                expanded_data.append(copy.deepcopy(item))
+        task = task + '/' + args.bbh_subset
     
     total_tasks = len(expanded_data)
     print(f"Total remaining samples to process: {total_tasks}")
