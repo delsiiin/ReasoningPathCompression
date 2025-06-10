@@ -73,6 +73,15 @@ def Grad_Collect(model, tokenizer, args, data=None, task=None):
         data_sample = tokenizer_output['input_ids']
         data_mask = (tokenizer_output['attention_mask']==1)
 
+        if "1.5" in args.model_name.lower() and data_sample.size(-1) >= 8000:
+            continue
+        elif "7" in args.model_name.lower() and data_sample.size(-1) >= 4000:
+            continue
+        elif "8" in args.model_name.lower() and data_sample.size(-1) >= 4000:
+            continue
+            
+        print(f"Current Length: {data_sample.size(-1)}!!!!!!!!!!")
+
         logits = model(data_sample.to(next(model.parameters()).device))[0] # cross entropy loss
         labels = data_sample.to(next(model.parameters()).device)
         data_mask = data_mask.to(next(model.parameters()).device)

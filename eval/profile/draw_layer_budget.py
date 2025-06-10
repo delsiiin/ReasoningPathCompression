@@ -35,9 +35,14 @@ if __name__ == "__main__":
     # 3. 提取数据并转换为一维列表
     data = tensor.squeeze().tolist() 
 
+    if "1.5" in args.model or "7" in args.model: 
+        n_layers = 28
+    elif "8" in args.model:
+        n_layers = 32
+
     # 4. 绘制折线图
     plt.figure(figsize=(10, 4))
-    plt.plot(range(28), data, marker='o', linestyle='-')
+    plt.plot(range(n_layers), data, marker='o', linestyle='-')
     plt.title('Layer Budget')
     plt.xlabel('Layer ID')
     plt.ylabel('Mean L2 Norm')
