@@ -8,7 +8,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from .qwen2_vanilla import (
     apply_rotary_pos_emb,
     repeat_kv,
-    Qwen2FlashAttention2
+    Qwen2Attention
 )
 from transformers.utils import (
     logging,
@@ -16,13 +16,23 @@ from transformers.utils import (
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from rpc.rpc_utils import init_rpc
 
+import math
+
 logger = logging.get_logger(__name__)
 
-class Qwen2RPCAttention(Qwen2FlashAttention2):
+class Qwen2RPCAttention(Qwen2Attention):
+    """
+    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
+    and "Generating Long Sequences with Sparse Transformers".
+    """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         init_rpc(self)
         self.verbose = False
+
+        self.row_sum_accu = None
+        self.col_sum_accu = None
 
     def forward(
         self,
@@ -33,8 +43,8 @@ class Qwen2RPCAttention(Qwen2FlashAttention2):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ):
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -58,134 +68,75 @@ class Qwen2RPCAttention(Qwen2FlashAttention2):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
         
         if past_key_value is not None:
-            # Activate slicing cache only if the config has a value `sliding_windows` attribute
-            cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
-            kv_seq_len = key_states.shape[-2] + cache_position[0]
-            if (
-                getattr(self.config, "sliding_window", None) is not None
-                and kv_seq_len > self.config.sliding_window
-                and cache_has_contents
-            ):
-                slicing_tokens = 1 - self.config.sliding_window
-
-                past_key = past_key_value[self.layer_idx][0]
-                past_value = past_key_value[self.layer_idx][1]
-
-                past_key = past_key[:, :, slicing_tokens:, :].contiguous()
-                past_value = past_value[:, :, slicing_tokens:, :].contiguous()
-
-                if past_key.shape[-2] != self.config.sliding_window - 1:
-                    raise ValueError(
-                        f"past key must have a shape of (`batch_size, num_heads, self.config.sliding_window-1, head_dim`), got"
-                        f" {past_key.shape}"
-                    )
-
-                if attention_mask is not None:
-                    attention_mask = attention_mask[:, slicing_tokens:]
-                    attention_mask = torch.cat([attention_mask, torch.ones_like(attention_mask[:, -1:])], dim=-1)
-
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-            # Decoding
-            if q_len == 1:
-                
-                # cannot use 'past_key_value.get_seq_length'
-                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len - (self.kv_cluster.num_comp * self.kv_cluster.T) - self.kv_cluster.R
-                
-                if self.kv_cluster.selectors == 'recent' and target_length > self.kv_cluster.P - self.kv_cluster.R:
-                    # cache recent query states as selectors
-                    self.kv_cluster.cache_recent(query_states)
-
-                if target_length == self.kv_cluster.P - 1:
-
-                    # support gqa
-                    if self.kv_cluster.aggregation == 'none':
-                        key_states = repeat_kv(key_states, self.num_key_value_groups)
-                        value_states = repeat_kv(value_states, self.num_key_value_groups)
-                    
-                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-                    key_states_compress, value_states_compress = self.kv_cluster.compress_kv(key_states, value_states, query_states)
-                    
-                    # replace with compressed cache
-                    past_key_value.key_cache[self.layer_idx] = key_states_compress
-                    past_key_value.value_cache[self.layer_idx] = value_states_compress
-                    
-                    self.kv_cluster.num_comp += 1
-                
-                else:
-                    # support gqa
-                    if self.kv_cluster.aggregation == 'none':
-                        key_states = repeat_kv(key_states, self.num_key_value_groups)
-                        value_states = repeat_kv(value_states, self.num_key_value_groups)
-                    key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-            else:
-                past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
+            if q_len != 1:
                 # save cache length for prefill
                 self.kv_cluster.prompt_len = key_states.size()[-2]
                 self.kv_cluster.num_comp = 0
 
-        # flashattention2 kernel handles it automatically
         # repeat k/v heads if n_kv_heads < n_heads
-        #key_states = repeat_kv(key_states, self.num_key_value_groups)
-        #value_states = repeat_kv(value_states, self.num_key_value_groups)
-        dropout_rate = 0.0 if not self.training else self.attention_dropout
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-        # therefore the input hidden states gets silently casted in float32. Hence, we need
-        # cast them back in float16 just to be sure everything works as expected.
-        input_dtype = query_states.dtype
-        if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        if attention_mask is not None:  # no matter the length, we just slice it
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
 
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
 
-# Handle the case where the model is quantized
-            elif hasattr(self.config, "_pre_quantization_dtype"):
-                target_dtype = self.config._pre_quantization_dtype
+        if q_len == 1:
+
+            if self.row_sum_accu is None:
+                self.row_sum_accu = torch.sum(attn_weights[..., 1, : self.kv_cluster.prompt_len], dim=-1)
+                self.row_sum_accu = self.row_sum_accu.mean(dim=1)
             else:
-                target_dtype = self.q_proj.weight.dtype
+                cur_row_sum = torch.sum(attn_weights[..., 1, : self.kv_cluster.prompt_len], dim=-1)
+                cur_row_sum = cur_row_sum.mean(dim=1)
+                self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
+            
+            if self.col_sum_accu is None:
+                self.col_sum_accu = attn_weights[..., 1, self.kv_cluster.prompt_len :]
+                self.col_sum_accu = self.col_sum_accu.mean(dim=1)
+            else:
+                prev_col_sum = F.pad(self.col_sum_accu, pad=(0, q_len), mode='constant', value=0)
+                prev_col_sum = prev_col_sum.mean(dim=1)
+                self.col_sum_accu = attn_weights[..., 1, self.kv_cluster.prompt_len :] + prev_col_sum
+                
+            # cannot use 'past_key_value.get_seq_length'
+            target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len
 
-            logger.warning_once(
-                f"The input hidden states seems to be silently casted in float32, this might be related to"
-                f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-                f" {target_dtype}."
+            if target_length == self.kv_cluster.budget_cot - 1:
+
+                # support gqa
+                if self.kv_cluster.aggregation == 'none':
+                    key_states = repeat_kv(key_states, self.num_key_value_groups)
+                    value_states = repeat_kv(value_states, self.num_key_value_groups)
+                
+                key_states_compress, value_states_compress = self.kv_cluster.compress_kv(key_states, value_states, self.row_sum_accu, self.col_sum_accu)
+                
+                # replace with compressed cache
+                past_key_value.key_cache[self.layer_idx] = key_states_compress
+                past_key_value.value_cache[self.layer_idx] = value_states_compress
+                
+                self.kv_cluster.num_comp += 1
+            
+
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
             )
 
-            query_states = query_states.to(target_dtype)
-            key_states = key_states.to(target_dtype)
-            value_states = value_states.to(target_dtype)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        # Reashape to the expected shape for Flash Attention
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        if (
-            self.config.use_sliding_window
-            and getattr(self.config, "sliding_window", None) is not None
-            and self.layer_idx >= self.config.max_window_layers
-        ):
-            sliding_window = self.config.sliding_window
-        else:
-            sliding_window = None
-
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask[:,:key_states.shape[1]] if attention_mask is not None else attention_mask,
-            q_len,
-            position_ids=position_ids,
-            dropout=dropout_rate,
-            sliding_window=sliding_window,
-            is_causal=self.is_causal,
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
-        )
-
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:

@@ -28,5 +28,6 @@ def check_version():
 def enable_rpc():
     check_version()
 
-    LLAMA_ATTENTION_CLASSES['flash_attention_2'] = LlamaRPCAttention
-    QWEN2_ATTENTION_CLASSES['flash_attention_2'] = Qwen2RPCAttention
+    # cant get attn_weights from flash-attn
+    LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
+    QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention

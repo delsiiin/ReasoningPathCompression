@@ -20,24 +20,20 @@ def set_rpc_config(
     aggregation='all',
     kernel_size=7, 
     pooling='avgpool',
-    budget_cot=4096,
-    budget_ans=1024,
-    cp_ratio=4.0
     ):
 
     layers = len(model.model.layers)
 
     for i in range(layers):
-        model.model.layers[i].self_attn.kv_cluster.budget_cot = budget_cot
-        model.model.layers[i].self_attn.kv_cluster.cp_cot = int(budget_cot/cp_ratio)
-        model.model.layers[i].self_attn.kv_cluster.budget_ans = budget_ans
-        model.model.layers[i].self_attn.kv_cluster.cp_ans = int(budget_ans/cp_ratio)
+        model.model.layers[i].self_attn.kv_cluster.P = P
+        model.model.layers[i].self_attn.kv_cluster.T = int(P/c)
+        model.model.layers[i].self_attn.kv_cluster.R = R
         model.model.layers[i].self_attn.kv_cluster.selectors = selectors
         model.model.layers[i].self_attn.kv_cluster.aggregation = aggregation
         model.model.layers[i].self_attn.kv_cluster.kernel_size = kernel_size
         model.model.layers[i].self_attn.kv_cluster.pooling = pooling
 
-    print(f"[RPC Config][CoT Budget={budget_cot}, Ans Budget={budget_ans}, Compression ratio={cp_ratio}][selectors={selectors}, aggregation={aggregation}]",  flush=True)
+    print(f"[RPC Config][P={P}, R={R}, c={c}][selectors={selectors}, aggregation={aggregation}]",  flush=True)
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv for gqa_support
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -63,19 +59,15 @@ class RPCCluster():
                  kernel_size=7, 
                  pooling='avgpool',
                  num_key_value_groups=1,
-                 budget_cot=4096,
-                 budget_ans=1024,
-                 cp_ratio=4.0
                  ):
 
         self.layer_idx = layer_idx
 
         # compression arguments
-        self.budget_cot = budget_cot
-        self.budget_ans = budget_ans
-        self.cp_ratio = cp_ratio
-        self.cp_cot = int(budget_cot/cp_ratio)
-        self.cp_ans = int(budget_ans/cp_ratio)
+        self.P = P
+        self.R = R
+        self.c = c
+        self.T = int(P/c)
         self.prompt_len = 0
         self.num_comp = 0
 
@@ -99,16 +91,34 @@ class RPCCluster():
         else:
             self.cached_recent = torch.cat([self.cached_recent, current_query_states], dim=-2)
 
-    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu):
+    def compress_kv(self, origin_key_states, origin_value_states, query_states):
+
+        if self.selectors == 'recent' and self.cached_recent is not None:
+            selectors = torch.cat([self.cached_recent, query_states], dim=-2)
+            self.cached_recent = None # for next compress
+        else:
+            selectors = query_states
+
+        # # support gqa
+        key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
+        value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
+        
+        bsz, num_heads, q_len, head_dim = selectors.shape
+
+  
+        attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        # no need to deal with attention mask
+
+        attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-self.R], dim=-1, dtype=torch.float32).to(selectors.dtype)
+        attn_weights_sum = attn_weights.sum(dim = -2)
 
         if self.aggregation == 'all':
 
+            attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, 1, attn_weights_sum.shape[-1])
             if self.agg_func == 'max':
-                row_sum_accu = row_sum_accu.max(dim=-1).values
-                col_sum_accu = col_sum_accu.max(dim=-1).values
+                attn_weights_sum = attn_weights_sum.max(dim=-3).values
             elif self.agg_func == 'mean':
-                row_sum_accu = row_sum_accu.mean(dim=-1)
-                col_sum_accu = col_sum_accu.mean(dim=-1)
+                attn_weights_sum = attn_weights_sum.mean(dim=-3)
             else:
                 raise ValueError('agg_func not supported')
         
@@ -123,20 +133,13 @@ class RPCCluster():
                 raise ValueError('agg_func not supported')
 
         if self.pooling == 'avgpool':
-            row_attn_cache = F.avg_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            col_attn_cache = F.avg_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
         elif self.pooling == 'maxpool':
-            row_attn_cache = F.max_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            col_attn_cache = F.max_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+            attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
         else:
             raise ValueError('Pooling method not supported')
 
-        row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
-        col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
-        indices = torch.cat([row_indices, col_indices], dim=-1) 
-        indices = torch.sort(indices, dim=-1).values       # 排序
-        indices = torch.unique(indices, dim=-1)            # 去重
-        head_dim = origin_key_states.shape[-1]        
+        indices = attn_cache.topk((self.num_comp + 1) * self.T, dim=-1, largest=True).indices.sort(dim=-1).values        
         indices = indices.unsqueeze(-1).expand(-1, origin_key_states.size(1), -1, head_dim)
 
 
@@ -145,24 +148,24 @@ class RPCCluster():
             k_prompt = origin_key_states[:, :, :self.prompt_len, :]
             v_prompt = origin_value_states[:, :, :self.prompt_len, :]
 
-            k_past_compress = origin_key_states[:, :, self.prompt_len:, :].gather(dim = 2, index = indices)
-            v_past_compress = origin_value_states[:, :, self.prompt_len:, :].gather(dim = 2, index = indices)
+            k_past_compress = origin_key_states[:, :, self.prompt_len:-self.R, :].gather(dim = 2, index = indices)
+            v_past_compress = origin_value_states[:, :, self.prompt_len:-self.R, :].gather(dim = 2, index = indices)
             
-            # k_cur = origin_key_states[:, :, -self.R:, :]
-            # v_cur = origin_value_states[:, :, -self.R:, :]
+            k_cur = origin_key_states[:, :, -self.R:, :]
+            v_cur = origin_value_states[:, :, -self.R:, :]
 
         else:
             k_prompt = key_states[:, :, :self.prompt_len, :]
             v_prompt = value_states[:, :, :self.prompt_len, :]
 
-            k_past_compress = key_states[:, :, self.prompt_len:, :].gather(dim = 2, index = indices)
-            v_past_compress = value_states[:, :, self.prompt_len:, :].gather(dim = 2, index = indices)
+            k_past_compress = key_states[:, :, self.prompt_len:-self.R, :].gather(dim = 2, index = indices)
+            v_past_compress = value_states[:, :, self.prompt_len:-self.R, :].gather(dim = 2, index = indices)
 
-            # k_cur = key_states[:, :, -self.R:, :]
-            # v_cur = value_states[:, :, -self.R:, :]
+            k_cur = key_states[:, :, -self.R:, :]
+            v_cur = value_states[:, :, -self.R:, :]
 
-        key_states = torch.cat([k_prompt, k_past_compress], dim = 2)
-        value_states = torch.cat([v_prompt, v_past_compress], dim = 2)
+        key_states = torch.cat([k_prompt, k_past_compress, k_cur], dim = 2)
+        value_states = torch.cat([v_prompt, v_past_compress, v_cur], dim = 2)
 
 
         return key_states, value_states
@@ -182,7 +185,4 @@ def init_rpc(self):
             kernel_size = 7,
             pooling = 'avgpool',
             num_key_value_groups = self.config.num_attention_heads // self.config.num_key_value_heads,
-            budget_cot=4096,
-            budget_ans=1024,
-            cp_ratio=4.0
             )
