@@ -99,16 +99,22 @@ class RPCCluster():
         else:
             self.cached_recent = torch.cat([self.cached_recent, current_query_states], dim=-2)
 
-    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu):
+    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups):
 
         if self.aggregation == 'all':
 
+            origin_col_sum_accu = col_sum_accu
+            origin_row_sum_accu = row_sum_accu
+
+            row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, 1, row_sum_accu.shape[-1])
+            col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, 1, col_sum_accu.shape[-1])
+
             if self.agg_func == 'max':
-                row_sum_accu = row_sum_accu.max(dim=-1).values
-                col_sum_accu = col_sum_accu.max(dim=-1).values
+                row_sum_accu = row_sum_accu.max(dim=1).values
+                col_sum_accu = col_sum_accu.max(dim=1).values
             elif self.agg_func == 'mean':
-                row_sum_accu = row_sum_accu.mean(dim=-1)
-                col_sum_accu = col_sum_accu.mean(dim=-1)
+                row_sum_accu = row_sum_accu.mean(dim=1)
+                col_sum_accu = col_sum_accu.mean(dim=1)
             else:
                 raise ValueError('agg_func not supported')
         
@@ -136,6 +142,12 @@ class RPCCluster():
         indices = torch.cat([row_indices, col_indices], dim=-1) 
         indices = torch.sort(indices, dim=-1).values       # 排序
         indices = torch.unique(indices, dim=-1)            # 去重
+
+        # need check
+        sum_indices = indices.expand(-1, origin_key_states.size(1) * num_key_value_groups, -1)
+        col_sum_accu = origin_col_sum_accu.gather(dim = 2, index = sum_indices)
+        row_sum_accu = origin_row_sum_accu.gather(dim = 2, index = sum_indices)
+
         head_dim = origin_key_states.shape[-1]        
         indices = indices.unsqueeze(-1).expand(-1, origin_key_states.size(1), -1, head_dim)
 
@@ -165,7 +177,7 @@ class RPCCluster():
         value_states = torch.cat([v_prompt, v_past_compress], dim = 2)
 
 
-        return key_states, value_states
+        return key_states, value_states, col_sum_accu, row_sum_accu
    
 
 def init_rpc(self):

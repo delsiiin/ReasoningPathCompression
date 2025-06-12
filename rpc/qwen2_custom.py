@@ -20,6 +20,18 @@ import math
 
 logger = logging.get_logger(__name__)
 
+def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    将 (batch, num_attention_heads, seqlen, head_dim) 的张量还原为 
+    (batch, num_key_value_heads, seqlen, head_dim)，其中 num_key_value_heads = num_attention_heads // n_rep
+    """
+    batch, num_attention_heads, seqlen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    assert num_attention_heads % n_rep == 0, "num_attention_heads must be divisible by n_rep"
+    num_key_value_heads = num_attention_heads // n_rep
+    return hidden_states.view(batch, num_key_value_heads, n_rep, seqlen, head_dim)[:, :, 0, :, :]
+
 class Qwen2RPCAttention(Qwen2Attention):
     """
     Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
@@ -75,7 +87,9 @@ class Qwen2RPCAttention(Qwen2Attention):
                 # save cache length for prefill
                 self.kv_cluster.prompt_len = key_states.size()[-2]
                 self.kv_cluster.num_comp = 0
-
+                self.row_sum_accu = None
+                self.col_sum_accu = None
+    
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -88,45 +102,42 @@ class Qwen2RPCAttention(Qwen2Attention):
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        attn_output = torch.matmul(attn_weights, value_states)
 
         if q_len == 1:
 
             if self.row_sum_accu is None:
-                self.row_sum_accu = torch.sum(attn_weights[..., 1, : self.kv_cluster.prompt_len], dim=-1)
-                self.row_sum_accu = self.row_sum_accu.mean(dim=1)
+                self.row_sum_accu = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                self.row_sum_accu = self.row_sum_accu.unsqueeze(-1)
             else:
-                cur_row_sum = torch.sum(attn_weights[..., 1, : self.kv_cluster.prompt_len], dim=-1)
-                cur_row_sum = cur_row_sum.mean(dim=1)
+                cur_row_sum = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                cur_row_sum = cur_row_sum.unsqueeze(-1)
                 self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
             
             if self.col_sum_accu is None:
-                self.col_sum_accu = attn_weights[..., 1, self.kv_cluster.prompt_len :]
-                self.col_sum_accu = self.col_sum_accu.mean(dim=1)
+                self.col_sum_accu = attn_weights[..., 0, self.kv_cluster.prompt_len :]
             else:
                 prev_col_sum = F.pad(self.col_sum_accu, pad=(0, q_len), mode='constant', value=0)
-                prev_col_sum = prev_col_sum.mean(dim=1)
-                self.col_sum_accu = attn_weights[..., 1, self.kv_cluster.prompt_len :] + prev_col_sum
+                # if self.kv_cluster.num_comp == 1:
+                #     print(prev_col_sum.shape, attn_weights[..., 0, self.kv_cluster.prompt_len :].shape)
+                self.col_sum_accu = attn_weights[..., 0, self.kv_cluster.prompt_len :] + prev_col_sum
                 
             # cannot use 'past_key_value.get_seq_length'
             target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len
 
-            if target_length == self.kv_cluster.budget_cot - 1:
+            if target_length >= self.kv_cluster.budget_cot - 1:
 
-                # support gqa
-                if self.kv_cluster.aggregation == 'none':
-                    key_states = repeat_kv(key_states, self.num_key_value_groups)
-                    value_states = repeat_kv(value_states, self.num_key_value_groups)
+                key_states = restore_kv(key_states, self.num_key_value_groups)
+                value_states = restore_kv(value_states, self.num_key_value_groups)
                 
-                key_states_compress, value_states_compress = self.kv_cluster.compress_kv(key_states, value_states, self.row_sum_accu, self.col_sum_accu)
+                key_states_compress, value_states_compress, self.col_sum_accu, self.row_sum_accu = self.kv_cluster.compress_kv(key_states, value_states, self.row_sum_accu, self.col_sum_accu, self.num_key_value_groups)
                 
                 # replace with compressed cache
                 past_key_value.key_cache[self.layer_idx] = key_states_compress
                 past_key_value.value_cache[self.layer_idx] = value_states_compress
                 
                 self.kv_cluster.num_comp += 1
-            
 
-        attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
