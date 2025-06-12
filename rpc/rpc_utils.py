@@ -32,6 +32,7 @@ def set_rpc_config(
         model.model.layers[i].self_attn.kv_cluster.cp_cot = int(budget_cot/cp_ratio)
         model.model.layers[i].self_attn.kv_cluster.budget_ans = budget_ans
         model.model.layers[i].self_attn.kv_cluster.cp_ans = int(budget_ans/cp_ratio)
+        model.model.layers[i].self_attn.kv_cluster.R = R
         model.model.layers[i].self_attn.kv_cluster.selectors = selectors
         model.model.layers[i].self_attn.kv_cluster.aggregation = aggregation
         model.model.layers[i].self_attn.kv_cluster.kernel_size = kernel_size
@@ -78,6 +79,7 @@ class RPCCluster():
         self.cp_ans = int(budget_ans/cp_ratio)
         self.prompt_len = 0
         self.num_comp = 0
+        self.R = R
 
         self.kernel_size = kernel_size
         self.pooling = pooling
@@ -105,6 +107,9 @@ class RPCCluster():
 
             origin_col_sum_accu = col_sum_accu
             origin_row_sum_accu = row_sum_accu
+
+            row_sum_accu = row_sum_accu[..., :-self.R]
+            col_sum_accu = col_sum_accu[..., :-self.R]
 
             row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, 1, row_sum_accu.shape[-1])
             col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, 1, col_sum_accu.shape[-1])
@@ -145,8 +150,8 @@ class RPCCluster():
 
         # need check
         sum_indices = indices.expand(-1, origin_key_states.size(1) * num_key_value_groups, -1)
-        col_sum_accu = origin_col_sum_accu.gather(dim = 2, index = sum_indices)
-        row_sum_accu = origin_row_sum_accu.gather(dim = 2, index = sum_indices)
+        col_sum_accu = torch.cat([origin_col_sum_accu.gather(dim = 2, index = sum_indices), origin_col_sum_accu[..., -self.R:]], dim=-1)
+        row_sum_accu = torch.cat([origin_row_sum_accu.gather(dim = 2, index = sum_indices), origin_row_sum_accu[..., -self.R:]], dim=-1)
 
         head_dim = origin_key_states.shape[-1]        
         indices = indices.unsqueeze(-1).expand(-1, origin_key_states.size(1), -1, head_dim)
@@ -160,8 +165,8 @@ class RPCCluster():
             k_past_compress = origin_key_states[:, :, self.prompt_len:, :].gather(dim = 2, index = indices)
             v_past_compress = origin_value_states[:, :, self.prompt_len:, :].gather(dim = 2, index = indices)
             
-            # k_cur = origin_key_states[:, :, -self.R:, :]
-            # v_cur = origin_value_states[:, :, -self.R:, :]
+            k_cur = origin_key_states[:, :, -self.R:, :]
+            v_cur = origin_value_states[:, :, -self.R:, :]
 
         else:
             k_prompt = key_states[:, :, :self.prompt_len, :]
@@ -173,8 +178,8 @@ class RPCCluster():
             # k_cur = key_states[:, :, -self.R:, :]
             # v_cur = value_states[:, :, -self.R:, :]
 
-        key_states = torch.cat([k_prompt, k_past_compress], dim = 2)
-        value_states = torch.cat([v_prompt, v_past_compress], dim = 2)
+        key_states = torch.cat([k_prompt, k_past_compress, k_cur], dim = 2)
+        value_states = torch.cat([v_prompt, v_past_compress, v_cur], dim = 2)
 
 
         return key_states, value_states, col_sum_accu, row_sum_accu
