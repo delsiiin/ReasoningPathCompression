@@ -103,13 +103,13 @@ class RPCCluster():
 
     def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups):
 
+        origin_col_sum_accu = col_sum_accu
+        origin_row_sum_accu = row_sum_accu
+
+        row_sum_accu = row_sum_accu[..., :-self.R]
+        col_sum_accu = col_sum_accu[..., :-self.R]
+
         if self.aggregation == 'all':
-
-            origin_col_sum_accu = col_sum_accu
-            origin_row_sum_accu = row_sum_accu
-
-            row_sum_accu = row_sum_accu[..., :-self.R]
-            col_sum_accu = col_sum_accu[..., :-self.R]
 
             row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, 1, row_sum_accu.shape[-1])
             col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, 1, col_sum_accu.shape[-1])
@@ -125,11 +125,15 @@ class RPCCluster():
         
         elif self.aggregation == 'group':
 
-            attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
+            row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, num_key_value_groups, row_sum_accu.shape[-1])
+            col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, num_key_value_groups, col_sum_accu.shape[-1])
+
             if self.agg_func == 'max':
-                attn_weights_sum = attn_weights_sum.max(dim=-2).values
+                row_sum_accu = row_sum_accu.max(dim=-2).values
+                col_sum_accu = col_sum_accu.max(dim=-2).values
             elif self.agg_func == 'mean':
-                attn_weights_sum = attn_weights_sum.mean(dim=-2)
+                row_sum_accu = row_sum_accu.mean(dim=-2)
+                col_sum_accu = col_sum_accu.mean(dim=-2)
             else:
                 raise ValueError('agg_func not supported')
 
@@ -149,7 +153,14 @@ class RPCCluster():
         indices = torch.unique(indices, dim=-1)            # 去重
 
         # need check
-        sum_indices = indices.expand(-1, origin_key_states.size(1) * num_key_value_groups, -1)
+        if self.aggregation == 'all':
+            batch, n_head, slen = indices.shape
+            sum_indices = indices[:, None, :, :].expand(batch, origin_key_states.size(1) * num_key_value_groups, n_head, slen)
+            sum_indices = sum_indices.reshape(batch, n_head * origin_key_states.size(1) * num_key_value_groups, slen)
+        elif self.aggregation == 'group':
+            batch, n_head, slen = indices.shape
+            sum_indices = indices[:, None, :, :].expand(batch, num_key_value_groups, n_head, slen)
+            sum_indices = sum_indices.reshape(batch, n_head * num_key_value_groups, slen)
         col_sum_accu = torch.cat([origin_col_sum_accu.gather(dim = 2, index = sum_indices), origin_col_sum_accu[..., -self.R:]], dim=-1)
         row_sum_accu = torch.cat([origin_row_sum_accu.gather(dim = 2, index = sum_indices), origin_row_sum_accu[..., -self.R:]], dim=-1)
 
