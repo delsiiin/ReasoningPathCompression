@@ -28,7 +28,7 @@ from utils.apply_chat_template import apply_chat_template
 # QwQ 32B
 # Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?
 
-def gen_example(model_path: str = "/home/yangx/QwQ-32B",
+def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
             rpc: bool = True,
             max_new_tokens: int = 32768,
             # RPC arguments
@@ -37,6 +37,9 @@ def gen_example(model_path: str = "/home/yangx/QwQ-32B",
             c=4,
             selectors='recent',
             aggregation='all',
+            budget_cot=4096,
+            budget_ans=1024,
+            cp_ratio=4.0,
             mode=None,
             ):
 
@@ -93,6 +96,9 @@ def gen_example(model_path: str = "/home/yangx/QwQ-32B",
                             aggregation=aggregation,
                             kernel_size=7,
                             pooling='avgpool',
+                            budget_cot=budget_cot,
+                            budget_ans=budget_ans,
+                            cp_ratio=cp_ratio
                             )
     else:
         print(["Full KV Cache Inference"])
