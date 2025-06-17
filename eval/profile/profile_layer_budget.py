@@ -183,7 +183,7 @@ parser.add_argument('--model_name', type=str, default='lmsys/vicuna-13b-v1.5-16k
 parser.add_argument('--tokenizer_name', type=str, default=None)
 parser.add_argument('--grad_dir', type=str, help='directory to save grad')
 parser.add_argument('--data_path', type=str, help='dataset directory')
-parser.add_argument("--bbh_subset", type=str, required=True, help="BBH task type")
+parser.add_argument("--bbh_subset", type=str, required=False, help="BBH task type")
 parser.add_argument('--data_range', nargs='+', type=int, default=None, help='data range')
 parser.add_argument('--gradient_abs', action='store_true', help='whether to use absolute value for each gradient')
 parser.add_argument('--weight_gradient', action='store_true', help='whether to collect gradient of weight')
