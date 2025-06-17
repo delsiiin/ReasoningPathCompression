@@ -112,6 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--pooling", type=str, default='avgpool', help="Type of local pooling")
 
     parser.add_argument("--data_path", type=str, required=True, help="Data path")
+    parser.add_argument("--test_data_num", type=int, required=False, default=None, help="Choose how many samples to test")
     parser.add_argument("--bbh_subset", type=str, required=False, help="BBH task type")
     parser.add_argument("--budget_cot", type=int, default=4096, help="Compression budget for CoT")
     parser.add_argument("--budget_ans", type=int, default=1024, help="Compression budget for answer")
@@ -200,6 +201,9 @@ if __name__ == "__main__":
     print(f"Total remaining samples to process: {total_tasks}")
 
     world_size = torch.cuda.device_count()
+
+    if args.test_data_num:
+        expanded_data = expanded_data[:args.test_data_num]
 
     data_subsets = [expanded_data[i::world_size] for i in range(world_size)]
 
