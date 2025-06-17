@@ -12,7 +12,7 @@ import re
 
 from transformers import AutoTokenizer
 
-def draw_ca_ratios(ca_ratios, avg_ca_ratio, model, task):
+def draw_ca_ratios(ca_ratios, avg_ca_ratio, args, task):
     # 绘制折线图
     plt.figure(figsize=(10, 6))
     plt.plot(ca_ratios, marker='o', markersize=2, label='ca_ratio')
@@ -24,9 +24,9 @@ def draw_ca_ratios(ca_ratios, avg_ca_ratio, model, task):
     plt.legend()
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{model}/{task}_ca_ratio.pdf")
+    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}/{args.bbh_subset}_ca_ratio.pdf")
 
-def draw_lens(CoT_lens, AnS_lens, model, task):
+def draw_lens(CoT_lens, AnS_lens, args, task):
     # 绘制折线图
     plt.figure(figsize=(10, 6))
     plt.plot(CoT_lens, marker='o', markersize=2, label='CoT_lens')
@@ -38,7 +38,7 @@ def draw_lens(CoT_lens, AnS_lens, model, task):
     plt.legend()
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{model}/{task}_lens.pdf")
+    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}/{args.bbh_subset}_lens.pdf")
 
 if __name__ == "__main__":
 
@@ -46,6 +46,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, required=True, help="Data path")
     parser.add_argument("--model", type=str, required=True, help="Model name")
     parser.add_argument("--model_path", type=str, required=True, help="Model path")
+    parser.add_argument("--bbh_subset", type=str, required=True, help="BBH task type")
     args = parser.parse_args()
 
     if "aime" in args.data_path.lower():
@@ -98,6 +99,6 @@ if __name__ == "__main__":
             
     print(f"The Average CoT to Answer Ratio for Task {task} is: {avg_ca_ratio}.")
 
-    draw_ca_ratios(ca_ratios=ca_ratios, avg_ca_ratio=avg_ca_ratio, model=args.model, task=task)
+    draw_ca_ratios(ca_ratios=ca_ratios, avg_ca_ratio=avg_ca_ratio, args=args, task=task)
 
-    draw_lens(CoT_lens=CoT_lens, AnS_lens=AnS_lens, model=args.model, task=task)
+    draw_lens(CoT_lens=CoT_lens, AnS_lens=AnS_lens, args=args, task=task)
