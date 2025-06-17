@@ -24,7 +24,10 @@ def draw_ca_ratios(ca_ratios, avg_ca_ratio, args, task):
     plt.legend()
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}/{args.bbh_subset}_ca_ratio.pdf")
+    if args.bbh_subset:
+        plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}/{args.bbh_subset}_ca_ratio.pdf")
+    else:
+        plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}_ca_ratio.pdf")
 
 def draw_lens(CoT_lens, AnS_lens, args, task):
     # 绘制折线图
@@ -38,7 +41,10 @@ def draw_lens(CoT_lens, AnS_lens, args, task):
     plt.legend()
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}/{args.bbh_subset}_lens.pdf")
+    if args.bbh_subset:
+        plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}/{args.bbh_subset}_lens.pdf")
+    else:
+        plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/ca_ratios/{args.model}/{task}_lens.pdf")
 
 if __name__ == "__main__":
 
@@ -46,7 +52,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, required=True, help="Data path")
     parser.add_argument("--model", type=str, required=True, help="Model name")
     parser.add_argument("--model_path", type=str, required=True, help="Model path")
-    parser.add_argument("--bbh_subset", type=str, required=True, help="BBH task type")
+    parser.add_argument("--bbh_subset", type=str, required=False, help="BBH task type")
     args = parser.parse_args()
 
     if "aime" in args.data_path.lower():

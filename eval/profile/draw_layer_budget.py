@@ -8,6 +8,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run profiling on layer budget")
     parser.add_argument("--grad_path", type=str, required=True, help="Grad path")
     parser.add_argument("--model", type=str, required=True, help="Model name")
+    parser.add_argument("--bbh_subset", type=str, required=False, help="BBH task type")
     args = parser.parse_args()
 
     if "aime" in args.grad_path.lower():
@@ -51,4 +52,7 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-    plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/{args.model}/{task}/layer_budget.pdf")
+    if args.bbh_subset:
+        plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/{args.model}/{task}/{args.bbh_subset}/layer_budget.pdf")
+    else:
+        plt.savefig(f"/home/yangx/ReasoningPathCompression/eval/profile/grad_dir/{args.model}/{task}/layer_budget.pdf")
