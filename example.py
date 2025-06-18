@@ -52,7 +52,7 @@ def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
     print(f"Using Model: {model_path}, therefore top_k={top_k}")
     
     if rpc:
-        enable_rpc()
+        enable_rpc(mode)
     
     if "qwen" in model_path.lower() or "qwq" in model_path.lower():
         from rpc.qwen2_config import Qwen2Config

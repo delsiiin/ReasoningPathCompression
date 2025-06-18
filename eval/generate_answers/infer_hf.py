@@ -20,31 +20,39 @@ from datasets import load_dataset
 
 from eval.generate_answers.utils_hf import format_gpqa_question
 
+from rpc.llama_config import LlamaConfig
 from rpc.llama_vanilla import LlamaForCausalLM
+from rpc.qwen2_config import Qwen2Config
 from rpc.qwen2_vanilla import Qwen2ForCausalLM
 
-def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, budget_ans, cp_ratio):
+def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, budget_ans, cp_ratio, mode):
     
     device = torch.device(f'cuda:{rank}')
 
     if rpc:
-        enable_rpc()
+        enable_rpc(mode)
 
     attn_implementation = 'eager'
 
     if "qwen" in model_path.lower() or "qwq" in model_path.lower():
+        config = Qwen2Config.from_pretrained(model_path)
+        config.update({'mode':mode})
         model = Qwen2ForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-            attn_implementation=attn_implementation
+            attn_implementation=attn_implementation,
+            config=config
         ).to(device)
     elif "llama" in model_path.lower():
+        config = LlamaConfig.from_pretrained(model_path)
+        config.update({'mode':mode})
         model = LlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-            attn_implementation=attn_implementation
+            attn_implementation=attn_implementation,
+            config=config
         ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.padding_side = 'left'
@@ -116,7 +124,8 @@ if __name__ == "__main__":
     parser.add_argument("--bbh_subset", type=str, required=False, help="BBH task type")
     parser.add_argument("--budget_cot", type=int, default=4096, help="Compression budget for CoT")
     parser.add_argument("--budget_ans", type=int, default=1024, help="Compression budget for answer")
-    parser.add_argument("--cp_ratio", type=float, default=4, help="Target compression ratio")
+    parser.add_argument("--cp_ratio", type=float, default=0.25, help="Target compression ratio")
+    parser.add_argument("--mode", type=str, default=None, help="heatmap, dynamic_layer_budget. (None is for uniform allocation)")
     args = parser.parse_args()
 
     if 'qwq' in args.model_path.lower():
@@ -209,7 +218,7 @@ if __name__ == "__main__":
 
     processes = []
     for rank in range(world_size):
-        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.budget_ans, args.cp_ratio))
+        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.budget_ans, args.cp_ratio, args.mode))
 
         p.start()
 
