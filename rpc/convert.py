@@ -5,9 +5,10 @@ import transformers
 # from transformers.models.llama.modeling_llama import LLAMA_ATTENTION_CLASSES
 from rpc.llama_vanilla import LLAMA_ATTENTION_CLASSES
 from rpc.qwen2_vanilla import QWEN2_ATTENTION_CLASSES
+from rpc.qwen2_vanilla import Qwen2Model
 
 from rpc.llama_custom import LlamaRPCAttention
-from rpc.qwen2_custom import Qwen2RPCAttention
+from rpc.qwen2_custom import Qwen2RPCAttention, Qwen2RPCModel
 
 
 def check_version():
@@ -25,9 +26,12 @@ def check_version():
         warnings.warn(f"Transformers version {transformers_version} might not be compatible with SnapKV. SnapKV is tested with Transformers version {version_list}.")
 
 
-def enable_rpc():
+def enable_rpc(mode):
     check_version()
 
     # cant get attn_weights from flash-attn
     LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
+
     QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
+    if mode == "dynamic_layer_budget":
+        Qwen2Model.forward = Qwen2RPCModel.forward
