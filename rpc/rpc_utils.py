@@ -22,16 +22,17 @@ def set_rpc_config(
     pooling='avgpool',
     budget_cot=4096,
     budget_ans=1024,
-    cp_ratio=4.0
+    cp_ratio=0.25
     ):
 
     layers = len(model.model.layers)
 
     for i in range(layers):
         model.model.layers[i].self_attn.kv_cluster.budget_cot = budget_cot
-        model.model.layers[i].self_attn.kv_cluster.cp_cot = int(budget_cot/cp_ratio)
+        model.model.layers[i].self_attn.kv_cluster.cp_ratio = cp_ratio
+        model.model.layers[i].self_attn.kv_cluster.cp_cot = int(budget_cot*cp_ratio)
         model.model.layers[i].self_attn.kv_cluster.budget_ans = budget_ans
-        model.model.layers[i].self_attn.kv_cluster.cp_ans = int(budget_ans/cp_ratio)
+        model.model.layers[i].self_attn.kv_cluster.cp_ans = int(budget_ans*cp_ratio)
         model.model.layers[i].self_attn.kv_cluster.R = R
         model.model.layers[i].self_attn.kv_cluster.selectors = selectors
         model.model.layers[i].self_attn.kv_cluster.aggregation = aggregation
@@ -66,7 +67,7 @@ class RPCCluster():
                  num_key_value_groups=1,
                  budget_cot=4096,
                  budget_ans=1024,
-                 cp_ratio=4.0
+                 cp_ratio=0.25
                  ):
 
         self.layer_idx = layer_idx
@@ -75,8 +76,8 @@ class RPCCluster():
         self.budget_cot = budget_cot
         self.budget_ans = budget_ans
         self.cp_ratio = cp_ratio
-        self.cp_cot = int(budget_cot/cp_ratio)
-        self.cp_ans = int(budget_ans/cp_ratio)
+        self.cp_cot = int(budget_cot*cp_ratio)
+        self.cp_ans = int(budget_ans*cp_ratio)
         self.prompt_len = 0
         self.num_comp = 0
         self.R = R
@@ -212,5 +213,5 @@ def init_rpc(self):
             num_key_value_groups = self.config.num_attention_heads // self.config.num_key_value_heads,
             budget_cot=4096,
             budget_ans=1024,
-            cp_ratio=4.0
+            cp_ratio=0.25
             )
