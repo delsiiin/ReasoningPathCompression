@@ -25,14 +25,17 @@ from rpc.llama_vanilla import LlamaForCausalLM
 from rpc.qwen2_config import Qwen2Config
 from rpc.qwen2_vanilla import Qwen2ForCausalLM
 
-def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, budget_ans, cp_ratio, mode):
+def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, budget_ans, cp_ratio, mode):
     
     device = torch.device(f'cuda:{rank}')
 
     if rpc:
         enable_rpc(mode)
 
-    attn_implementation = 'eager'
+    if mode == "rpc" or mode is None:
+        attn_implementation = 'flash_attention_2'
+    else:
+        attn_implementation = 'eager'
 
     if "qwen" in model_path.lower() or "qwq" in model_path.lower():
         config = Qwen2Config.from_pretrained(model_path)
@@ -98,7 +101,81 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
 
         total_tasks -= processing
 
+def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, task, budget_cot, budget_ans, cp_ratio, mode):
+    
+    if rpc:
+        enable_rpc(mode)
 
+    if mode == "rpc" or mode is None:
+        attn_implementation = 'flash_attention_2'
+    else:
+        attn_implementation = 'eager'
+
+    if "qwen" in model_path.lower() or "qwq" in model_path.lower():
+        config = Qwen2Config.from_pretrained(model_path)
+        config.update({'mode':mode})
+        model = Qwen2ForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            attn_implementation=attn_implementation,
+            config=config,
+            device_map="auto"
+        )
+    elif "llama" in model_path.lower():
+        config = LlamaConfig.from_pretrained(model_path)
+        config.update({'mode':mode})
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            attn_implementation=attn_implementation,
+            config=config,
+            device_map="auto"
+        )
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.padding_side = 'left'
+
+    if rpc: 
+        set_rpc_config(model=model,
+                            P=P,
+                            R=R,
+                            c=c,
+                            selectors=selectors,
+                            aggregation=aggregation,
+                            kernel_size=kernel_size,
+                            pooling=pooling,
+                            budget_cot=budget_cot,
+                            budget_ans=budget_ans,
+                            cp_ratio=cp_ratio,
+                            mode=mode
+                            )
+
+    else:
+        print(f"Full KV Cache Inference")
+
+    for i in tqdm(range(0, len(data), batch_size)):
+
+        batch_dicts = data[i : i + batch_size] 
+
+        processing = len(batch_dicts)
+        print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
+        print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
+        
+        batched_generate(
+            model=model,
+            tokenizer=tokenizer,
+            output_file=output_file,
+            batch_dicts=batch_dicts,
+            batch_size=batch_size,
+            max_new_tokens=32768,
+            temperature=0.6,
+            top_p=0.95,
+            top_k=top_k,
+            task=task
+        )
+
+        total_tasks -= processing
 
 if __name__ == "__main__":
 
@@ -127,6 +204,7 @@ if __name__ == "__main__":
     parser.add_argument("--budget_ans", type=int, default=1024, help="Compression budget for answer")
     parser.add_argument("--cp_ratio", type=float, default=0.25, help="Target compression ratio")
     parser.add_argument("--mode", type=str, default=None, help="heatmap, rpc, ours_all_step, ours_window, dynamic_layer_budget. (None is for uniform allocation)")
+    parser.add_argument("--data_parallel", action="store_true", help="whether use multi-processing")
     args = parser.parse_args()
 
     if 'qwq' in args.model_path.lower():
@@ -164,13 +242,16 @@ if __name__ == "__main__":
             data = json.load(f)
     elif task == "bbh":
         data = load_dataset(args.data_path, args.bbh_subset)
+    elif task == "aime":
+        with open(args.data_path, 'r', encoding='utf-8') as f:
+            data = [json.loads(l) for l in f]
     else:
         data = load_dataset(args.data_path)
 
     expanded_data = []
     if task == "aime":
-        for item in data['train']:
-            prompt = item['problem']
+        for item in data:
+            prompt = item['prompt']
             completed = completed_counts.get(prompt, 0)
             remaining = max(args.n_samples - completed, 0)
             for _ in range(remaining):
@@ -210,22 +291,29 @@ if __name__ == "__main__":
     total_tasks = len(expanded_data)
     print(f"Total remaining samples to process: {total_tasks}")
 
-    world_size = torch.cuda.device_count()
-
     if args.test_data_num:
         expanded_data = expanded_data[:args.test_data_num]
 
-    data_subsets = [expanded_data[i::world_size] for i in range(world_size)]
+    if args.data_parallel:
 
-    processes = []
-    for rank in range(world_size):
-        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.budget_ans, args.cp_ratio, args.mode))
+        world_size = torch.cuda.device_count()
 
-        p.start()
+        data_subsets = [expanded_data[i::world_size] for i in range(world_size)]
 
-        processes.append(p)
+        processes = []
+        for rank in range(world_size):
+            p = mp.Process(target=gen_result_dp, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.budget_ans, args.cp_ratio, args.mode))
 
-    for p in processes:
-        p.join()
+            p.start()
+
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+    
+    else:
+
+        gen_result(expanded_data, args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, task, args.budget_cot, args.budget_ans, args.cp_ratio, args.mode)
+
 
     
