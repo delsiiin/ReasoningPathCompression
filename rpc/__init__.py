@@ -1,2 +1,1 @@
-from .convert import enable_rpc
-from .rpc_utils import set_rpc_config
+from .convert import enable_rpc, set_rpc_config

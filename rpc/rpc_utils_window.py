@@ -11,36 +11,6 @@ from flash_attn import flash_attn_func
 # perform qk calculation and get indices
 # this version will not update in inference mode
 
-def set_rpc_config(
-    model,
-    P=1024,
-    R=32,
-    c=4,
-    selectors='recent',
-    aggregation='all',
-    kernel_size=7, 
-    pooling='avgpool',
-    budget_cot=4096,
-    budget_ans=1024,
-    cp_ratio=0.25
-    ):
-
-    layers = len(model.model.layers)
-
-    for i in range(layers):
-        model.model.layers[i].self_attn.kv_cluster.budget_cot = budget_cot
-        model.model.layers[i].self_attn.kv_cluster.cp_ratio = cp_ratio
-        model.model.layers[i].self_attn.kv_cluster.cp_cot = int(budget_cot*cp_ratio)
-        model.model.layers[i].self_attn.kv_cluster.budget_ans = budget_ans
-        model.model.layers[i].self_attn.kv_cluster.cp_ans = int(budget_ans*cp_ratio)
-        model.model.layers[i].self_attn.kv_cluster.R = R
-        model.model.layers[i].self_attn.kv_cluster.selectors = selectors
-        model.model.layers[i].self_attn.kv_cluster.aggregation = aggregation
-        model.model.layers[i].self_attn.kv_cluster.kernel_size = kernel_size
-        model.model.layers[i].self_attn.kv_cluster.pooling = pooling
-
-    print(f"[RPC Config][CoT Budget={budget_cot}, Ans Budget={budget_ans}, Compression ratio={cp_ratio}][selectors={selectors}, aggregation={aggregation}]",  flush=True)
-
 # Copied from transformers.models.llama.modeling_llama.repeat_kv for gqa_support
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -104,12 +74,10 @@ class RPCCluster():
 
     def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups):
 
-        origin_col_sum_accu = col_sum_accu
         origin_row_sum_accu = row_sum_accu
 
         row_sum_accu = row_sum_accu[..., :-self.R]
-        col_sum_accu = col_sum_accu[..., :-self.R]
-
+        
         if self.aggregation == 'all':
 
             row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, 1, row_sum_accu.shape[-1])
@@ -147,11 +115,13 @@ class RPCCluster():
         else:
             raise ValueError('Pooling method not supported')
 
-        row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
-        col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
-        indices = torch.cat([row_indices, col_indices], dim=-1) 
-        indices = torch.sort(indices, dim=-1).values       # 排序
-        indices = torch.unique(indices, dim=-1)            # 去重
+        row_col_sum = row_attn_cache + col_attn_cache / self.R
+        indices = row_col_sum.topk((self.num_comp + 1) * self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
+        # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
+        # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
+        # indices = torch.cat([row_indices, col_indices], dim=-1) 
+        # indices = torch.sort(indices, dim=-1).values       # 排序
+        # indices = torch.unique(indices, dim=-1)            # 去重
 
         # need check
         if self.aggregation == 'all':
@@ -162,7 +132,6 @@ class RPCCluster():
             batch, n_head, slen = indices.shape
             sum_indices = indices[:, None, :, :].expand(batch, num_key_value_groups, n_head, slen)
             sum_indices = sum_indices.reshape(batch, n_head * num_key_value_groups, slen)
-        col_sum_accu = torch.cat([origin_col_sum_accu.gather(dim = 2, index = sum_indices), origin_col_sum_accu[..., -self.R:]], dim=-1)
         row_sum_accu = torch.cat([origin_row_sum_accu.gather(dim = 2, index = sum_indices), origin_row_sum_accu[..., -self.R:]], dim=-1)
 
         head_dim = origin_key_states.shape[-1]        
@@ -194,7 +163,7 @@ class RPCCluster():
         value_states = torch.cat([v_prompt, v_past_compress, v_cur], dim = 2)
 
 
-        return key_states, value_states, col_sum_accu, row_sum_accu
+        return key_states, value_states, row_sum_accu
    
 
 def init_rpc(self):

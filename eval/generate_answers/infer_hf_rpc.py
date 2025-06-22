@@ -25,18 +25,17 @@ from rpc.llama_vanilla import LlamaForCausalLM
 from rpc.qwen2_config import Qwen2Config
 from rpc.qwen2_vanilla import Qwen2ForCausalLM
 
-def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, budget_ans, cp_ratio, mode):
+def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, mode):
     
     device = torch.device(f'cuda:{rank}')
 
     if rpc:
         enable_rpc(mode)
 
-    attn_implementation = 'eager'
+    attn_implementation = 'flash_attention_2'
 
     if "qwen" in model_path.lower() or "qwq" in model_path.lower():
         config = Qwen2Config.from_pretrained(model_path)
-        config.update({'mode':mode})
         model = Qwen2ForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -46,7 +45,6 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
         ).to(device)
     elif "llama" in model_path.lower():
         config = LlamaConfig.from_pretrained(model_path)
-        config.update({'mode':mode})
         model = LlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -66,9 +64,6 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
                             aggregation=aggregation,
                             kernel_size=kernel_size,
                             pooling=pooling,
-                            budget_cot=budget_cot,
-                            budget_ans=budget_ans,
-                            cp_ratio=cp_ratio,
                             mode=mode
                             )
 
@@ -123,10 +118,10 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, required=True, help="Data path")
     parser.add_argument("--test_data_num", type=int, required=False, default=None, help="Choose how many samples to test")
     parser.add_argument("--bbh_subset", type=str, required=False, help="BBH task type")
-    parser.add_argument("--budget_cot", type=int, default=4096, help="Compression budget for CoT")
-    parser.add_argument("--budget_ans", type=int, default=1024, help="Compression budget for answer")
-    parser.add_argument("--cp_ratio", type=float, default=0.25, help="Target compression ratio")
-    parser.add_argument("--mode", type=str, default=None, help="heatmap, rpc, ours_all_step, ours_window, dynamic_layer_budget. (None is for uniform allocation)")
+    # parser.add_argument("--budget_cot", type=int, default=4096, help="Compression budget for CoT")
+    # parser.add_argument("--budget_ans", type=int, default=1024, help="Compression budget for answer")
+    # parser.add_argument("--cp_ratio", type=float, default=0.25, help="Target compression ratio")
+    parser.add_argument("--mode", type=str, default=None, help="heatmap, dynamic_layer_budget. (None is for uniform allocation)")
     args = parser.parse_args()
 
     if 'qwq' in args.model_path.lower():
@@ -219,7 +214,7 @@ if __name__ == "__main__":
 
     processes = []
     for rank in range(world_size):
-        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.budget_ans, args.cp_ratio, args.mode))
+        p = mp.Process(target=gen_result, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.mode))
 
         p.start()
 

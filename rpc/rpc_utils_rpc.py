@@ -11,30 +11,6 @@ from flash_attn import flash_attn_func
 # perform qk calculation and get indices
 # this version will not update in inference mode
 
-def set_rpc_config(
-    model,
-    P=1024,
-    R=32,
-    c=4,
-    selectors='recent',
-    aggregation='all',
-    kernel_size=7, 
-    pooling='avgpool',
-    ):
-
-    layers = len(model.model.layers)
-
-    for i in range(layers):
-        model.model.layers[i].self_attn.kv_cluster.P = P
-        model.model.layers[i].self_attn.kv_cluster.T = int(P/c)
-        model.model.layers[i].self_attn.kv_cluster.R = R
-        model.model.layers[i].self_attn.kv_cluster.selectors = selectors
-        model.model.layers[i].self_attn.kv_cluster.aggregation = aggregation
-        model.model.layers[i].self_attn.kv_cluster.kernel_size = kernel_size
-        model.model.layers[i].self_attn.kv_cluster.pooling = pooling
-
-    print(f"[RPC Config][P={P}, R={R}, c={c}][selectors={selectors}, aggregation={aggregation}]",  flush=True)
-
 # Copied from transformers.models.llama.modeling_llama.repeat_kv for gqa_support
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
