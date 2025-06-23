@@ -3,6 +3,7 @@ import argparse
 from tqdm import tqdm
 import os
 from pathlib import Path
+from rich.progress import track
 
 import copy
 import concurrent.futures
@@ -78,7 +79,7 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
     else:
         print(f"Full KV Cache Inference")
 
-    for i in tqdm(range(0, len(data), batch_size)):
+    for i in track(range(0, len(data), batch_size)):
 
         batch_dicts = data[i : i + batch_size] 
 
@@ -154,7 +155,7 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
     else:
         print(f"Full KV Cache Inference")
 
-    for i in tqdm(range(0, len(data), batch_size)):
+    for i in track(range(0, len(data), batch_size)):
 
         batch_dicts = data[i : i + batch_size] 
 
