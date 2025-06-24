@@ -70,7 +70,7 @@ class RPCCluster():
     def compress_kv(self, origin_key_states, origin_value_states, query_states):
 
         if self.selectors == 'recent' and self.cached_recent is not None:
-            selectors = torch.cat([self.cached_recent, query_states], dim=-2)
+            selectors = self.cached_recent
             self.cached_recent = None # for next compress
         else:
             selectors = query_states

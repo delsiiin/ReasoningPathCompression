@@ -93,7 +93,7 @@ class Qwen2RPCAttention(Qwen2FlashAttention2):
                 # cannot use 'past_key_value.get_seq_length'
                 target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len - (self.kv_cluster.num_comp * self.kv_cluster.T) - self.kv_cluster.R
                 
-                if self.kv_cluster.selectors == 'recent' and target_length > self.kv_cluster.P - self.kv_cluster.R:
+                if self.kv_cluster.selectors == 'recent' and target_length >= self.kv_cluster.P - self.kv_cluster.R:
                     # cache recent query states as selectors
                     self.kv_cluster.cache_recent(query_states)
 
