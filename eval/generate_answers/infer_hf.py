@@ -84,8 +84,8 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
         batch_dicts = data[i : i + batch_size] 
 
         processing = len(batch_dicts)
-        print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
-        print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
+        # print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
+        # print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
         
         batched_generate(
             model=model,

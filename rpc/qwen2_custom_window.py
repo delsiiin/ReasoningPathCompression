@@ -10,6 +10,8 @@ from .qwen2_vanilla import (
     repeat_kv,
     Qwen2Attention,
     Qwen2Model,
+    Qwen2ForCausalLM,
+    _prepare_4d_causal_attention_mask_with_cache_position
 )
 from transformers.utils import (
     logging,
@@ -43,6 +45,8 @@ class Qwen2RPCAttention(Qwen2Attention):
         super().__init__(*args, **kwargs)
         init_rpc(self)
         self.verbose = False
+
+        self.cache_mode = "compression"  # options: vanilla, compression
 
         self.layer_budget_importance = None
 
@@ -102,69 +106,86 @@ class Qwen2RPCAttention(Qwen2Attention):
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        if q_len == 1:
-                
-            # cannot use 'past_key_value.get_seq_length'
-            target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len - (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) 
-                
-            if target_length > self.kv_cluster.budget_cot - self.kv_cluster.R:
-                
-                # self.kv_cluster.cache_recent(query_states)
 
-                partial_attn_weights = nn.functional.softmax(attn_weights[..., 0, self.kv_cluster.prompt_len:self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(query_states.dtype)
+        if self.cache_mode == "vanilla":
 
-                if self.col_sum_accu is None:
-                    self.col_sum_accu = partial_attn_weights
+            if self.layer_idx == 0 and not hasattr(self, "_cot_done_printed"):
+                print("\033[33mCoT Done!!! Start Answering...\033[0m")
+                self._cot_done_printed = True
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+        elif self.cache_mode == "compression":
+
+            if q_len == 1:
+                    
+                # cannot use 'past_key_value.get_seq_length'
+                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len - (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) 
+                    
+                if target_length > self.kv_cluster.budget_cot - self.kv_cluster.R:
+                    
+                    # self.kv_cluster.cache_recent(query_states)
+
+                    partial_attn_weights = nn.functional.softmax(attn_weights[..., 0, self.kv_cluster.prompt_len:self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(query_states.dtype)
+
+                    if self.col_sum_accu is None:
+                        self.col_sum_accu = partial_attn_weights
+                    else:
+                        prev_col_sum = self.col_sum_accu
+                        self.col_sum_accu = prev_col_sum + partial_attn_weights
+
+                # upcast attention to fp32
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+                attn_output = torch.matmul(attn_weights, value_states)
+
+                if self.row_sum_accu is None:
+                    self.row_sum_accu = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                    self.row_sum_accu = self.row_sum_accu.unsqueeze(-1)
                 else:
-                    prev_col_sum = self.col_sum_accu
-                    self.col_sum_accu = prev_col_sum + partial_attn_weights
+                    cur_row_sum = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                    cur_row_sum = cur_row_sum.unsqueeze(-1)
+                    self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
+                
+                if target_length == self.kv_cluster.budget_cot:
 
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            attn_output = torch.matmul(attn_weights, value_states)
+                    key_states = restore_kv(key_states, self.num_key_value_groups)
+                    value_states = restore_kv(value_states, self.num_key_value_groups)
+                    
+                    key_states_compress, value_states_compress, self.row_sum_accu = self.kv_cluster.compress_kv(key_states, value_states, self.row_sum_accu, self.col_sum_accu, self.num_key_value_groups)
 
-            if self.row_sum_accu is None:
-                self.row_sum_accu = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
-                self.row_sum_accu = self.row_sum_accu.unsqueeze(-1)
-            else:
-                cur_row_sum = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
-                cur_row_sum = cur_row_sum.unsqueeze(-1)
-                self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
+                    self.col_sum_accu = None
+                    
+                    # replace with compressed cache
+                    past_key_value.key_cache[self.layer_idx] = key_states_compress
+                    past_key_value.value_cache[self.layer_idx] = value_states_compress
+                    
+                    self.kv_cluster.num_comp += 1
             
-            if target_length == self.kv_cluster.budget_cot:
-
-                key_states = restore_kv(key_states, self.num_key_value_groups)
-                value_states = restore_kv(value_states, self.num_key_value_groups)
-                
-                key_states_compress, value_states_compress, self.row_sum_accu = self.kv_cluster.compress_kv(key_states, value_states, self.row_sum_accu, self.col_sum_accu, self.num_key_value_groups)
-
-                self.col_sum_accu = None
-                
-                # replace with compressed cache
-                past_key_value.key_cache[self.layer_idx] = key_states_compress
-                past_key_value.value_cache[self.layer_idx] = value_states_compress
-                
-                self.kv_cluster.num_comp += 1
-        
-        else:
-            
-            if self.config.mode == "dynamic_layer_budget":
-                self.layer_budget_importance = attn_weights[..., :self.kv_cluster.prompt_len, :self.kv_cluster.prompt_len].sum(dim=-2).var(dim=-1).mean(dim=0) # refer to D2O (针对单样本复制多个打batch，不支持不同输入打batch)
-
-                var_max = self.layer_budget_importance.max()
-                var_min = self.layer_budget_importance.min()
-
-                self.layer_budget_importance = (self.layer_budget_importance - var_min) / (var_max - var_min + 1e-6)
-
-                self.layer_budget_importance = self.layer_budget_importance.mean(1) 
             else:
-                pass
+                
+                if self.config.mode == "dynamic_layer_budget":
+                    self.layer_budget_importance = attn_weights[..., :self.kv_cluster.prompt_len, :self.kv_cluster.prompt_len].sum(dim=-2).var(dim=-1).mean(dim=0) # refer to D2O (针对单样本复制多个打batch，不支持不同输入打batch)
 
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            attn_output = torch.matmul(attn_weights, value_states)
+                    var_max = self.layer_budget_importance.max()
+                    var_min = self.layer_budget_importance.min()
+
+                    self.layer_budget_importance = (self.layer_budget_importance - var_min) / (var_max - var_min + 1e-6)
+
+                    self.layer_budget_importance = self.layer_budget_importance.mean(1) 
+                else:
+                    pass
+
+                # upcast attention to fp32
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+                attn_output = torch.matmul(attn_weights, value_states)
+
+                if self.layer_idx == 0:
+                    print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
 
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -343,3 +364,90 @@ class Qwen2RPCModel(Qwen2Model):
             attentions=all_self_attns,
         )
     
+
+class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    # Copied from transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        num_logits_to_keep=None,
+        **kwargs,
+    ):
+        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        # Exception 1: when passing input_embeds, input_ids may be missing entries
+        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        if past_key_values is not None:
+            if inputs_embeds is not None:  # Exception 1
+                input_ids = input_ids[:, -cache_position.shape[0] :]
+            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
+                input_ids = input_ids[:, cache_position]
+
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past_key_values:
+                position_ids = position_ids[:, -input_ids.shape[1] :]
+
+                # This `clone` call is needed to avoid recapturing cuda graphs with `torch.compile`'s  `mode="reduce-overhead`, as otherwise the input `position_ids` would have various stride during the decoding. Here, simply using `.contiguous()` is not sufficient as in the batch size = 1 case, `position_ids` is already contiguous but with varying stride which retriggers a capture.
+                position_ids = position_ids.clone(memory_format=torch.contiguous_format)
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and cache_position[0] == 0:
+            model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
+        else:
+            # The clone here is for the same reason as for `position_ids`.
+            model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format), "inputs_embeds": None}
+
+        ###################################################################
+        if 151649 in model_inputs["input_ids"]: # check for </> token
+            
+            for layer in self.model.layers:
+                layer.self_attn.cache_mode = "vanilla"
+        ###################################################################
+
+        if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
+            if model_inputs["inputs_embeds"] is not None:
+                batch_size, sequence_length, _ = model_inputs["inputs_embeds"].shape
+                device = model_inputs["inputs_embeds"].device
+            else:
+                batch_size, sequence_length = model_inputs["input_ids"].shape
+                device = model_inputs["input_ids"].device
+
+            dtype = self.lm_head.weight.dtype
+            min_dtype = torch.finfo(dtype).min
+
+            attention_mask = _prepare_4d_causal_attention_mask_with_cache_position(
+                attention_mask,
+                sequence_length=sequence_length,
+                target_length=past_key_values.get_max_length(),
+                dtype=dtype,
+                device=device,
+                min_dtype=min_dtype,
+                cache_position=cache_position,
+                batch_size=batch_size,
+            )
+
+        if num_logits_to_keep is not None:
+            model_inputs["num_logits_to_keep"] = num_logits_to_keep
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+            }
+        )
+        return model_inputs

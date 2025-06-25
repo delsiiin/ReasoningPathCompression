@@ -5,7 +5,7 @@ import transformers
 # from transformers.models.llama.modeling_llama import LLAMA_ATTENTION_CLASSES
 from rpc.llama_vanilla import LLAMA_ATTENTION_CLASSES
 from rpc.qwen2_vanilla import QWEN2_ATTENTION_CLASSES
-from rpc.qwen2_vanilla import Qwen2Model
+from rpc.qwen2_vanilla import Qwen2Model, Qwen2ForCausalLM
 
 
 def check_version():
@@ -48,13 +48,14 @@ def enable_rpc(mode=None):
 
     elif mode == "ours_window":
         from rpc.llama_custom import LlamaRPCAttention
-        from rpc.qwen2_custom_window import Qwen2RPCAttention, Qwen2RPCModel
+        from rpc.qwen2_custom_window import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM
 
         # cant get attn_weights from flash-attn
         LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
 
         QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
+        Qwen2ForCausalLM.prepare_inputs_for_generation = Qwen2RPCForCausalLM.prepare_inputs_for_generation
 
 def set_rpc_config(
     model,
