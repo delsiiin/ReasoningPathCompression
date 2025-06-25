@@ -74,6 +74,23 @@ class RPCCluster():
 
     def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups):
 
+        # selectors = self.cached_recent
+
+        # # # support gqa
+        # key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
+        # value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
+        
+        # bsz, num_heads, q_len, head_dim = selectors.shape
+
+  
+        # attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        # # no need to deal with attention mask
+
+        # attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-self.R], dim=-1, dtype=torch.float32).to(selectors.dtype)
+        # attn_weights_sum = attn_weights.sum(dim = -2)
+
+        # print(attn_weights_sum, 1111111111)
+            
         origin_row_sum_accu = row_sum_accu
 
         row_sum_accu = row_sum_accu[..., :-self.R]
@@ -115,13 +132,15 @@ class RPCCluster():
         else:
             raise ValueError('Pooling method not supported')
 
-        row_col_sum = row_attn_cache + col_attn_cache / self.R
+        row_col_sum = row_attn_cache + col_attn_cache
         indices = row_col_sum.topk((self.num_comp + 1) * self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # indices = torch.cat([row_indices, col_indices], dim=-1) 
         # indices = torch.sort(indices, dim=-1).values       # 排序
         # indices = torch.unique(indices, dim=-1)            # 去重
+
+        # self.cached_recent = None # for next compress
 
         # need check
         if self.aggregation == 'all':

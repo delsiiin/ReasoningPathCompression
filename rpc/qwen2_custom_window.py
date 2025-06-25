@@ -102,36 +102,37 @@ class Qwen2RPCAttention(Qwen2Attention):
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-
         if q_len == 1:
-
-            if self.row_sum_accu is None:
-                self.row_sum_accu = torch.mean(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
-                self.row_sum_accu = self.row_sum_accu.unsqueeze(-1)
-            else:
-                cur_row_sum = torch.mean(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
-                cur_row_sum = cur_row_sum.unsqueeze(-1)
-                self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
                 
             # cannot use 'past_key_value.get_seq_length'
             target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len - (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) 
                 
+            if target_length > self.kv_cluster.budget_cot - self.kv_cluster.R:
+                
+                # self.kv_cluster.cache_recent(query_states)
 
-            if target_length >= self.kv_cluster.budget_cot - 1 - self.kv_cluster.R and target_length < self.kv_cluster.budget_cot - 1:
+                partial_attn_weights = nn.functional.softmax(attn_weights[..., 0, self.kv_cluster.prompt_len:self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(query_states.dtype)
 
                 if self.col_sum_accu is None:
-                    self.col_sum_accu = attn_weights[..., 0, self.kv_cluster.prompt_len : self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - 1 - self.kv_cluster.R]
+                    self.col_sum_accu = partial_attn_weights
                 else:
                     prev_col_sum = self.col_sum_accu
-                    # if self.kv_cluster.num_comp == 1:
-                    #     print(prev_col_sum.shape, attn_weights[..., 0, self.kv_cluster.prompt_len :].shape)
-                    self.col_sum_accu = attn_weights[..., 0, self.kv_cluster.prompt_len : self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - 1 - self.kv_cluster.R] + prev_col_sum
+                    self.col_sum_accu = prev_col_sum + partial_attn_weights
 
-            if target_length >= self.kv_cluster.budget_cot - 1:
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            if self.row_sum_accu is None:
+                self.row_sum_accu = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                self.row_sum_accu = self.row_sum_accu.unsqueeze(-1)
+            else:
+                cur_row_sum = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                cur_row_sum = cur_row_sum.unsqueeze(-1)
+                self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
+            
+            if target_length == self.kv_cluster.budget_cot:
 
                 key_states = restore_kv(key_states, self.num_key_value_groups)
                 value_states = restore_kv(value_states, self.num_key_value_groups)
@@ -160,6 +161,10 @@ class Qwen2RPCAttention(Qwen2Attention):
             else:
                 pass
 
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
 
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
