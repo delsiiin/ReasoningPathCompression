@@ -23,6 +23,11 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
+def calculate_entropy(attention_scores):
+    attention_scores = attention_scores.to(torch.float32)
+    entropy = -torch.sum(attention_scores * torch.log(attention_scores + 1e-10))  
+    entropy= entropy.to(dtype=torch.float32)
+    return entropy
 
 class RPCCluster():
     def __init__(self,
@@ -132,7 +137,7 @@ class RPCCluster():
         else:
             raise ValueError('Pooling method not supported')
 
-        row_col_sum = row_attn_cache + col_attn_cache
+        row_col_sum = col_attn_cache #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
         indices = row_col_sum.topk((self.num_comp + 1) * self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
