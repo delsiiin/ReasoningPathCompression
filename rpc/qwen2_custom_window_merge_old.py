@@ -129,7 +129,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                     
                     # self.kv_cluster.cache_recent(query_states)
 
-                    partial_attn_weights = nn.functional.softmax(attn_weights[..., 0, self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot):self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(query_states.dtype)
+                    partial_attn_weights = nn.functional.softmax(attn_weights[..., 0, self.kv_cluster.prompt_len:self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(query_states.dtype)
 
                     if self.col_sum_accu is None:
                         self.col_sum_accu = partial_attn_weights

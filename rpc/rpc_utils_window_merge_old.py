@@ -139,7 +139,7 @@ class RPCCluster():
             raise ValueError('Pooling method not supported')
 
         row_col_sum = col_attn_cache #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
-        indices = row_col_sum.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
+        indices = row_col_sum.topk((self.num_comp + 1) * self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # indices = torch.cat([row_indices, col_indices], dim=-1) 
@@ -162,17 +162,15 @@ class RPCCluster():
         bsz, num_heads, _, head_dim = origin_key_states.shape  
         # indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
-        target_key_states = origin_key_states[:, :, self.prompt_len+(self.num_comp * self.cp_cot):-self.R, :]
-        target_value_states = origin_value_states[:, :, self.prompt_len+(self.num_comp * self.cp_cot):-self.R, :]
+        target_key_states = origin_key_states[:, :, self.prompt_len:-self.R, :]
+        target_value_states = origin_value_states[:, :, self.prompt_len:-self.R, :]
 
         mask = torch.zeros(target_key_states.shape[:-1], dtype=torch.bool).to(target_key_states.device)
         mask = mask.scatter(-1, indices, 1)
 
         k_hh_recent = target_key_states[mask].view(bsz, num_heads, -1, head_dim)
-        k_hh_recent = torch.cat([origin_key_states[:, :, self.prompt_len:self.prompt_len+(self.num_comp * self.cp_cot), :], k_hh_recent], dim=-2)
         v_hh_recent = target_value_states[mask].view(bsz, num_heads, -1, head_dim)
-        v_hh_recent = torch.cat([origin_value_states[:, :, self.prompt_len:self.prompt_len+(self.num_comp * self.cp_cot), :], v_hh_recent], dim=-2)
-
+        
         # applying merge here
         # breakpoint()
         k_hh_pruned = target_key_states[~mask].view(bsz, num_heads, -1, head_dim)
