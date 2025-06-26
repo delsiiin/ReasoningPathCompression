@@ -57,6 +57,17 @@ def enable_rpc(mode=None):
         Qwen2Model.forward = Qwen2RPCModel.forward
         Qwen2ForCausalLM.prepare_inputs_for_generation = Qwen2RPCForCausalLM.prepare_inputs_for_generation
 
+    elif mode == "ours_window_merge":
+        from rpc.llama_custom import LlamaRPCAttention
+        from rpc.qwen2_custom_window_merge import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM
+
+        # cant get attn_weights from flash-attn
+        LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
+
+        QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
+        Qwen2Model.forward = Qwen2RPCModel.forward
+        Qwen2ForCausalLM.prepare_inputs_for_generation = Qwen2RPCForCausalLM.prepare_inputs_for_generation
+
 def set_rpc_config(
     model,
     P=1024,
@@ -87,7 +98,7 @@ def set_rpc_config(
 
         print(f"[RPC Config][P={P}, R={R}, c={c}][selectors={selectors}, aggregation={aggregation}]",  flush=True)
 
-    elif mode == "ours_all_step" or mode == "ours_window":
+    elif "ours" in mode:
         
         for i in range(layers):
             model.model.layers[i].self_attn.kv_cluster.budget_cot = budget_cot
