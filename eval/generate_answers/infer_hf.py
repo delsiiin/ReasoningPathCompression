@@ -217,6 +217,10 @@ if __name__ == "__main__":
 
     if "aime" in args.data_path.lower():
         task = "aime"
+    elif "ifeval" in args.data_path.lower():
+        task = "ifeval"
+    elif "livecodebench" in args.data_path.lower():
+        task = "livecodebench"
     elif "gsm8k" in args.data_path.lower():
         task = "gsm8k"
     elif "math500" in args.data_path.lower():
@@ -243,14 +247,14 @@ if __name__ == "__main__":
             data = json.load(f)
     elif task == "bbh":
         data = load_dataset(args.data_path, args.bbh_subset)
-    elif task == "aime":
+    elif task == "aime" or task == "ifeval" or task == "livecodebench":
         with open(args.data_path, 'r', encoding='utf-8') as f:
             data = [json.loads(l) for l in f]
     else:
         data = load_dataset(args.data_path)
 
     expanded_data = []
-    if task == "aime":
+    if task == "aime" or task == "ifeval" or task == "livecodebench":
         for item in data:
             prompt = item['prompt']
             completed = completed_counts.get(prompt, 0)
