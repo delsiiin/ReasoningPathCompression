@@ -15,7 +15,7 @@ import copy
 
 from livecodebench_v5_utils.compute_code_generation_metrics import _temp_run
 
-LIVECODEBENCH_TESTS = os.getenv("LIVECODEBENCH_TESTS", "data/livecodebench_v5_tests")
+LIVECODEBENCH_TESTS = os.getenv("LIVECODEBENCH_TESTS", "/home/yangx/ReasoningPathCompression/datasets/livecodebench_v5_tests")
 
 def _extract_code(text: str) -> str:
     outputlines = text.split("\n")
