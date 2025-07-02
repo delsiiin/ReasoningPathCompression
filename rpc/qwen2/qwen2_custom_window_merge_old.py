@@ -17,7 +17,7 @@ from transformers.utils import (
     logging,
 )
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
-from rpc.rpc_utils_window_merge import init_rpc
+from rpc.rpc_utils_window_merge_old import init_rpc
 
 import math
 
@@ -97,6 +97,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.kv_cluster.threshold = None
                 self.row_sum_accu = None
                 self.col_sum_accu = None
+                self.cache_mode = "compression"
     
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -410,10 +411,10 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
             model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format), "inputs_embeds": None}
 
         ###################################################################
-        if 151649 in model_inputs["input_ids"]: # check for </> token
+        # if 151649 in model_inputs["input_ids"]: # check for </> token
             
-            for layer in self.model.layers:
-                layer.self_attn.cache_mode = "vanilla"
+        #     for layer in self.model.layers:
+        #         layer.self_attn.cache_mode = "vanilla"
         ###################################################################
 
         if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
