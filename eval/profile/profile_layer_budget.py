@@ -9,14 +9,14 @@ from datasets import load_from_disk
 import warnings
 import json
 
-from rpc.llama_profile import LlamaModel_use_attention_matrix_grad_log
-from rpc.qwen2_profile import Qwen2Model_use_attention_matrix_grad_log
+from rpc.llama.llama_profile import LlamaModel_use_attention_matrix_grad_log
+from rpc.qwen2.qwen2_profile import Qwen2Model_use_attention_matrix_grad_log
 
-from rpc.llama_config import LlamaConfig
-from rpc.llama_vanilla import LlamaForCausalLM
+from rpc.llama.llama_config import LlamaConfig
+from rpc.llama.llama_vanilla import LlamaForCausalLM
 
-from rpc.qwen2_config import Qwen2Config
-from rpc.qwen2_vanilla import Qwen2ForCausalLM
+from rpc.qwen2.qwen2_config import Qwen2Config
+from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
 from eval.generate_answers.utils_hf import BBH_INSTRUCTIONS
 

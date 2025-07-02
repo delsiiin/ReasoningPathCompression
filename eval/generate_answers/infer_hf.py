@@ -21,10 +21,10 @@ from datasets import load_dataset
 
 from eval.generate_answers.utils_hf import format_gpqa_question
 
-from rpc.llama_config import LlamaConfig
-from rpc.llama_vanilla import LlamaForCausalLM
-from rpc.qwen2_config import Qwen2Config
-from rpc.qwen2_vanilla import Qwen2ForCausalLM
+from rpc.llama.llama_config import LlamaConfig
+from rpc.llama.llama_vanilla import LlamaForCausalLM
+from rpc.qwen2.qwen2_config import Qwen2Config
+from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
 def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, budget_ans, cp_ratio, mode):
     

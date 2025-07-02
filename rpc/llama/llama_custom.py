@@ -14,7 +14,7 @@ from transformers.utils import (
     logging,
 )
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
-from rpc.rpc_utils import init_rpc
+from rpc.rpc_utils_rpc import init_rpc
 
 logger = logging.get_logger(__name__)
 

@@ -5,8 +5,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, TextStreamer
 import transformers
 
-from rpc.llama_vanilla import LlamaForCausalLM
-from rpc.qwen2_vanilla import Qwen2ForCausalLM
+from rpc.llama.llama_vanilla import LlamaForCausalLM
+from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
 from rpc import enable_rpc, set_rpc_config
 from utils.apply_chat_template import apply_chat_template
@@ -55,7 +55,7 @@ def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
         enable_rpc(mode)
     
     if "qwen" in model_path.lower() or "qwq" in model_path.lower():
-        from rpc.qwen2_config import Qwen2Config
+        from rpc.qwen2.qwen2_config import Qwen2Config
 
         config = Qwen2Config.from_pretrained(model_path)
 
@@ -70,7 +70,7 @@ def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
             config=config
         )
     elif "llama" in model_path.lower():
-        from rpc.llama_config import LlamaConfig
+        from rpc.llama.llama_config import LlamaConfig
 
         config = LlamaConfig.from_pretrained(model_path)
 
