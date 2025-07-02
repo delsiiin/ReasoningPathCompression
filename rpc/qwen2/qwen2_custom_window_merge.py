@@ -46,7 +46,7 @@ class Qwen2RPCAttention(Qwen2Attention):
         init_rpc(self)
         self.verbose = False
 
-        self.cache_mode = "compression"  # options: vanilla, compression
+        self.cache_mode = None  # options: vanilla, compression
 
         self.layer_budget_importance = None
 
@@ -97,6 +97,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.kv_cluster.threshold = None
                 self.row_sum_accu = None
                 self.col_sum_accu = None
+                self.cache_mode = "compression"
     
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
