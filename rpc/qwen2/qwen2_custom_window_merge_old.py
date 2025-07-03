@@ -411,10 +411,10 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
             model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format), "inputs_embeds": None}
 
         ###################################################################
-        # if 151649 in model_inputs["input_ids"]: # check for </> token
+        if 151649 in model_inputs["input_ids"]: # check for </> token
             
-        #     for layer in self.model.layers:
-        #         layer.self_attn.cache_mode = "vanilla"
+            for layer in self.model.layers:
+                layer.self_attn.cache_mode = "vanilla"
         ###################################################################
 
         if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
