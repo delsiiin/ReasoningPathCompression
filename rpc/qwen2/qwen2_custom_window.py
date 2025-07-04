@@ -96,6 +96,10 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.kv_cluster.num_comp = 0
                 self.row_sum_accu = None
                 self.col_sum_accu = None
+                self.cache_mode = "compression"
+                self.question_cache = query_states
+                if hasattr(self, "_cot_done_printed"):
+                    delattr(self, "_cot_done_printed")
     
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -142,20 +146,31 @@ class Qwen2RPCAttention(Qwen2Attention):
                 attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
                 attn_output = torch.matmul(attn_weights, value_states)
 
-                if self.row_sum_accu is None:
-                    self.row_sum_accu = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
-                    self.row_sum_accu = self.row_sum_accu.unsqueeze(-1)
-                else:
-                    cur_row_sum = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
-                    cur_row_sum = cur_row_sum.unsqueeze(-1)
-                    self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
+                # if self.row_sum_accu is None:
+                #     self.row_sum_accu = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                #     self.row_sum_accu = self.row_sum_accu.unsqueeze(-1)
+                # else:
+                #     cur_row_sum = torch.sum(attn_weights[..., 0, : self.kv_cluster.prompt_len], dim=-1)
+                #     cur_row_sum = cur_row_sum.unsqueeze(-1)
+                #     self.row_sum_accu = torch.cat([self.row_sum_accu, cur_row_sum], dim=-1)
                 
                 if target_length == self.kv_cluster.budget_cot:
+
+                    question = self.question_cache
+
+                    bsz, num_heads, ques_len, head_dim = question.shape
+
+            
+                    ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+                    # no need to deal with attention mask
+
+                    ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:self.kv_cluster.prompt_len + (self.kv_cluster.num_comp * self.kv_cluster.cp_cot) + self.kv_cluster.budget_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(question.dtype)
+                    ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
 
                     key_states = restore_kv(key_states, self.num_key_value_groups)
                     value_states = restore_kv(value_states, self.num_key_value_groups)
                     
-                    key_states_compress, value_states_compress, self.row_sum_accu = self.kv_cluster.compress_kv(key_states, value_states, self.row_sum_accu, self.col_sum_accu, self.num_key_value_groups)
+                    key_states_compress, value_states_compress = self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups)
 
                     self.col_sum_accu = None
                     

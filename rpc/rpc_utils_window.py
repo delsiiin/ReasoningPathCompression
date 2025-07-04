@@ -96,9 +96,9 @@ class RPCCluster():
 
         # print(attn_weights_sum, 1111111111)
             
-        origin_row_sum_accu = row_sum_accu
+        # origin_row_sum_accu = row_sum_accu
 
-        row_sum_accu = row_sum_accu[..., :-self.R]
+        # row_sum_accu = row_sum_accu[..., :-self.R]
         
         if self.aggregation == 'all':
 
@@ -137,7 +137,8 @@ class RPCCluster():
         else:
             raise ValueError('Pooling method not supported')
 
-        row_col_sum = col_attn_cache #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
+        alpha = 0.5
+        row_col_sum = alpha * (col_attn_cache / self.R) + (1 - alpha) * (row_attn_cache / self.prompt_len) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
         indices = row_col_sum.topk((self.num_comp + 1) * self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
@@ -156,7 +157,7 @@ class RPCCluster():
             batch, n_head, slen = indices.shape
             sum_indices = indices[:, None, :, :].expand(batch, num_key_value_groups, n_head, slen)
             sum_indices = sum_indices.reshape(batch, n_head * num_key_value_groups, slen)
-        row_sum_accu = torch.cat([origin_row_sum_accu.gather(dim = 2, index = sum_indices), origin_row_sum_accu[..., -self.R:]], dim=-1)
+        # row_sum_accu = torch.cat([origin_row_sum_accu.gather(dim = 2, index = sum_indices), origin_row_sum_accu[..., -self.R:]], dim=-1)
 
         head_dim = origin_key_states.shape[-1]        
         indices = indices.unsqueeze(-1).expand(-1, origin_key_states.size(1), -1, head_dim)
@@ -187,7 +188,7 @@ class RPCCluster():
         value_states = torch.cat([v_prompt, v_past_compress, v_cur], dim = 2)
 
 
-        return key_states, value_states, row_sum_accu
+        return key_states, value_states
    
 
 def init_rpc(self):
