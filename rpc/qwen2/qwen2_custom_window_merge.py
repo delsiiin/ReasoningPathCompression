@@ -98,6 +98,8 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.row_sum_accu = None
                 self.col_sum_accu = None
                 self.cache_mode = "compression"
+                if hasattr(self, "_cot_done_printed"):
+                    delattr(self, "_cot_done_printed")
     
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
