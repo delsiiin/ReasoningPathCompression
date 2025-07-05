@@ -26,7 +26,7 @@ from rpc.llama.llama_vanilla import LlamaForCausalLM
 from rpc.qwen2.qwen2_config import Qwen2Config
 from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
-def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, budget_ans, cp_ratio, mode):
+def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, buffer_cot, budget_ans, cp_ratio, mode, divide_method):
     
     device = torch.device(f'cuda:{rank}')
 
@@ -38,9 +38,13 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
     else:
         attn_implementation = 'eager'
 
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.padding_side = 'left'
+
     if "qwen" in model_path.lower() or "qwq" in model_path.lower():
         config = Qwen2Config.from_pretrained(model_path)
         config.update({'mode':mode})
+        config.update({'divide_method':divide_method})
         model = Qwen2ForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -48,9 +52,22 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
             attn_implementation=attn_implementation,
             config=config
         ).to(device)
+        model.newline_token_ids = [
+            tokenizer.encode("\n")[-1],
+            tokenizer.encode(".\n")[-1],
+            tokenizer.encode(")\n")[-1],
+            tokenizer.encode("\n\n")[-1],
+            tokenizer.encode(".\n\n")[-1],
+            tokenizer.encode(")\n\n")[-1],
+        ]
+
+        model.CoT_done_token_ids = [
+            tokenizer.encode("</think>")[-1],
+        ]
     elif "llama" in model_path.lower():
         config = LlamaConfig.from_pretrained(model_path)
         config.update({'mode':mode})
+        config.update({'divide_method':divide_method})
         model = LlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -58,8 +75,19 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
             attn_implementation=attn_implementation,
             config=config
         ).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.padding_side = 'left'
+        model.newline_token_ids = [
+            tokenizer.encode("\n")[-1],
+            tokenizer.encode(".\n")[-1],
+            tokenizer.encode(")\n")[-1],
+            tokenizer.encode("\n\n")[-1],
+            tokenizer.encode(".\n\n")[-1],
+            tokenizer.encode(")\n\n")[-1],
+        ]
+
+        model.CoT_done_token_ids = [
+            tokenizer.encode("</think>")[-1],
+        ]
+    
 
     if rpc: 
         set_rpc_config(model=model,
@@ -71,6 +99,7 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
                             kernel_size=kernel_size,
                             pooling=pooling,
                             budget_cot=budget_cot,
+                            buffer_cot=buffer_cot,
                             budget_ans=budget_ans,
                             cp_ratio=cp_ratio,
                             mode=mode
@@ -102,7 +131,7 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
 
         total_tasks -= processing
 
-def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, task, budget_cot, budget_ans, cp_ratio, mode):
+def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, task, budget_cot, buffer_cot, budget_ans, cp_ratio, mode, divide_method):
     
     if rpc:
         enable_rpc(mode)
@@ -112,9 +141,13 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
     else:
         attn_implementation = 'eager'
 
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.padding_side = 'left'
+
     if "qwen" in model_path.lower() or "qwq" in model_path.lower():
         config = Qwen2Config.from_pretrained(model_path)
         config.update({'mode':mode})
+        config.update({'divide_method':divide_method})
         model = Qwen2ForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -123,9 +156,22 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
             config=config,
             device_map="auto"
         )
+        model.newline_token_ids = [
+            tokenizer.encode("\n")[-1],
+            tokenizer.encode(".\n")[-1],
+            tokenizer.encode(")\n")[-1],
+            tokenizer.encode("\n\n")[-1],
+            tokenizer.encode(".\n\n")[-1],
+            tokenizer.encode(")\n\n")[-1],
+        ]
+
+        model.CoT_done_token_ids = [
+            tokenizer.encode("</think>")[-1],
+        ]
     elif "llama" in model_path.lower():
         config = LlamaConfig.from_pretrained(model_path)
         config.update({'mode':mode})
+        config.update({'divide_method':divide_method})
         model = LlamaForCausalLM.from_pretrained(
             model_path,
             torch_dtype=torch.bfloat16,
@@ -134,8 +180,18 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
             config=config,
             device_map="auto"
         )
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    tokenizer.padding_side = 'left'
+        model.newline_token_ids = [
+            tokenizer.encode("\n")[-1],
+            tokenizer.encode(".\n")[-1],
+            tokenizer.encode(")\n")[-1],
+            tokenizer.encode("\n\n")[-1],
+            tokenizer.encode(".\n\n")[-1],
+            tokenizer.encode(")\n\n")[-1],
+        ]
+
+        model.CoT_done_token_ids = [
+            tokenizer.encode("</think>")[-1],
+        ]
 
     if rpc: 
         set_rpc_config(model=model,
@@ -147,6 +203,7 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
                             kernel_size=kernel_size,
                             pooling=pooling,
                             budget_cot=budget_cot,
+                            buffer_cot=buffer_cot,
                             budget_ans=budget_ans,
                             cp_ratio=cp_ratio,
                             mode=mode
@@ -202,9 +259,11 @@ if __name__ == "__main__":
     parser.add_argument("--test_data_num", type=int, required=False, default=None, help="Choose how many samples to test")
     parser.add_argument("--bbh_subset", type=str, required=False, help="BBH task type")
     parser.add_argument("--budget_cot", type=int, default=4096, help="Compression budget for CoT")
+    parser.add_argument("--buffer_cot", type=int, default=128, help="Newly generated token buffer for CoT")
     parser.add_argument("--budget_ans", type=int, default=1024, help="Compression budget for answer")
     parser.add_argument("--cp_ratio", type=float, default=0.25, help="Target compression ratio")
     parser.add_argument("--mode", type=str, default=None, help="heatmap, rpc, ours_all_step, ours_window, ours_window_merge, ours_window_merge_new, dynamic_layer_budget. (None is for uniform allocation)")
+    parser.add_argument("--divide_method", type=str, default=None, help="new_line, step_length")
     parser.add_argument("--data_parallel", action="store_true", help="whether use multi-processing")
     args = parser.parse_args()
 
@@ -307,7 +366,7 @@ if __name__ == "__main__":
 
         processes = []
         for rank in range(world_size):
-            p = mp.Process(target=gen_result_dp, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.budget_ans, args.cp_ratio, args.mode))
+            p = mp.Process(target=gen_result_dp, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.buffer_cot, args.budget_ans, args.cp_ratio, args.mode, args.divide_method))
 
             p.start()
 
@@ -318,7 +377,7 @@ if __name__ == "__main__":
     
     else:
 
-        gen_result(expanded_data, args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, task, args.budget_cot, args.budget_ans, args.cp_ratio, args.mode)
+        gen_result(expanded_data, args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, task, args.budget_cot, args.buffer_cot, args.budget_ans, args.cp_ratio, args.mode, args.divide_method)
 
 
     

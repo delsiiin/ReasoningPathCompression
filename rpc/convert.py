@@ -89,6 +89,7 @@ def set_rpc_config(
     kernel_size=7, 
     pooling='avgpool',
     budget_cot=4096,
+    buffer_cot=128,
     budget_ans=1024,
     cp_ratio=0.25,
     mode=None,
@@ -113,6 +114,7 @@ def set_rpc_config(
         
         for i in range(layers):
             model.model.layers[i].self_attn.kv_cluster.budget_cot = budget_cot
+            model.model.layers[i].self_attn.kv_cluster.buffer_cot = buffer_cot
             model.model.layers[i].self_attn.kv_cluster.cp_ratio = cp_ratio
             model.model.layers[i].self_attn.kv_cluster.cp_cot = int(budget_cot*cp_ratio)
             model.model.layers[i].self_attn.kv_cluster.budget_ans = budget_ans
@@ -123,4 +125,4 @@ def set_rpc_config(
             model.model.layers[i].self_attn.kv_cluster.kernel_size = kernel_size
             model.model.layers[i].self_attn.kv_cluster.pooling = pooling
 
-        print(f"[RPC Config][CoT Budget={budget_cot}, Ans Budget={budget_ans}, Compression ratio={cp_ratio}][selectors={selectors}, aggregation={aggregation}]",  flush=True)
+        print(f"[RPC Config][CoT Budget={budget_cot}, CoT Buffer={buffer_cot}, Ans Budget={budget_ans}, Compression ratio={cp_ratio}][selectors={selectors}, aggregation={aggregation}]",  flush=True)
