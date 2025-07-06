@@ -262,7 +262,7 @@ if __name__ == "__main__":
     parser.add_argument("--buffer_cot", type=int, default=128, help="Newly generated token buffer for CoT")
     parser.add_argument("--budget_ans", type=int, default=1024, help="Compression budget for answer")
     parser.add_argument("--cp_ratio", type=float, default=0.25, help="Target compression ratio")
-    parser.add_argument("--mode", type=str, default=None, help="heatmap, rpc, ours_all_step, ours_window, ours_window_merge, ours_window_merge_new, dynamic_layer_budget. (None is for uniform allocation)")
+    parser.add_argument("--mode", type=str, default=None, help="heatmap, rpc, ours_all_step, ours_window, ours_window_merge, ours_window_merge_rkv, ours_window_merge_new, dynamic_layer_budget. (None is for uniform allocation)")
     parser.add_argument("--divide_method", type=str, default=None, help="new_line, step_length")
     parser.add_argument("--data_parallel", action="store_true", help="whether use multi-processing")
     args = parser.parse_args()
