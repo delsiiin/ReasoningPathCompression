@@ -173,7 +173,7 @@ class RPCCluster():
             raise ValueError('Pooling method not supported')
 
         row_col_sum = col_attn_cache #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
-        indices = row_col_sum.topk(self.budget_cot, dim=-1, largest=True).indices.sort(dim=-1).values
+        indices = row_col_sum.topk(self.budget_cot-self.R, dim=-1, largest=True).indices.sort(dim=-1).values
         # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # indices = torch.cat([row_indices, col_indices], dim=-1) 
