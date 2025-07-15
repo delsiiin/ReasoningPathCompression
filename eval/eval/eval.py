@@ -6,6 +6,7 @@ import os
 from math_opensource import compute_scores as compute_scores_math_opensource
 from livecodebench_v5 import compute_scores as compute_scores_livecodebench_v5
 from ifeval import compute_scores as compute_scores_ifeval
+from gsm8k import compute_scores as compute_scores_gsm8k
 
 def get_after_think(text):
     parts = text.split("\n</think>\n\n", 1)
@@ -37,6 +38,9 @@ def main():
     elif "ifeval" in args.task_name:
         acc = compute_scores_ifeval(data, args.cache_path)
         print(f"Task: {args.task_name}, Strict_prompt_acc: {acc}")
+    elif "gsm8k" in args.task_name:
+        acc = compute_scores_gsm8k(data, args.cache_path)
+        print(f"Task: {args.task_name}, Accuracy: {acc}")
     else:
         print(f"No evaluation function found for task name: {args.task_name}")
     
