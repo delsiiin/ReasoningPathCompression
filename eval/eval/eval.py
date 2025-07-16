@@ -17,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate model outputs")
     parser.add_argument("--input_path", type=str, required=True, help="Path to input jsonl file")
     parser.add_argument("--cache_path", type=str, required=True, help="Path to save cache results")
-    parser.add_argument("--task_name", type=str, required=True, help="Task should be in ['math_opensource/aime24', 'math_opensource/aime25' , 'openai/gsm8k', livecodebench', 'ifeval']")
+    parser.add_argument("--task_name", type=str, required=True, help="Task should be in ['math_opensource/aime24', 'math_opensource/aime25' , 'openai/gsm8k', 'HuggingFaceH4/math500', livecodebench', 'ifeval']")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.cache_path), exist_ok=True)
@@ -28,7 +28,7 @@ def main():
         item["task"] = args.task_name
         temp = get_after_think(item['gen'][0])
         item['gen'][0] = temp
-    if "math_opensource" in args.task_name:
+    if "math_opensource" in args.task_name or "gsm8k" in args.task_name or "math500" in args.task_name:
         acc = compute_scores_math_opensource(data, args.cache_path)
         print(f"Task: {args.task_name}, Accuracy: {acc}")
     elif "livecodebench" in args.task_name:
@@ -37,9 +37,6 @@ def main():
     elif "ifeval" in args.task_name:
         acc = compute_scores_ifeval(data, args.cache_path)
         print(f"Task: {args.task_name}, Strict_prompt_acc: {acc}")
-    elif "gsm8k" in args.task_name:
-        acc = compute_scores_math_opensource(data, args.cache_path)
-        print(f"Task: {args.task_name}, Accuracy: {acc}")
     else:
         print(f"No evaluation function found for task name: {args.task_name}")
     
