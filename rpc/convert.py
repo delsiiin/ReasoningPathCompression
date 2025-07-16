@@ -6,6 +6,7 @@ import transformers
 from rpc.llama.llama_vanilla import LLAMA_ATTENTION_CLASSES
 from rpc.qwen2.qwen2_vanilla import QWEN2_ATTENTION_CLASSES
 from rpc.qwen2.qwen2_vanilla import Qwen2Model, Qwen2ForCausalLM
+from rpc.llama.llama_vanilla import LlamaModel, LlamaForCausalLM
 
 
 def check_version():
@@ -27,64 +28,64 @@ def enable_rpc(mode=None):
     check_version()
 
     if mode == "rpc":
-        from rpc.llama.llama_custom import LlamaRPCAttention
+        from rpc.llama.llama_custom_rpc import LlamaRPCAttention, LlamaRPCModel
         from rpc.qwen2.qwen2_custom_rpc import Qwen2RPCAttention, Qwen2RPCModel
         
         # cant get attn_weights from flash-attn
         LLAMA_ATTENTION_CLASSES['flash_attention_2'] = LlamaRPCAttention
+        LlamaModel.forward =LlamaRPCModel.forward
 
         QWEN2_ATTENTION_CLASSES['flash_attention_2'] = Qwen2RPCAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
 
-    elif mode == "ours_all_step":
-        from rpc.llama.llama_custom import LlamaRPCAttention
-        from rpc.qwen2.qwen2_custom_all_step import Qwen2RPCAttention, Qwen2RPCModel
-
-        # cant get attn_weights from flash-attn
-        LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
-
-        QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
-        Qwen2Model.forward = Qwen2RPCModel.forward
-
     elif mode == "ours_window":
-        from rpc.llama.llama_custom import LlamaRPCAttention
+        from rpc.llama.llama_custom_window import LlamaRPCAttention, LlamaRPCModel, LlamaRPCForCausalLM
         from rpc.qwen2.qwen2_custom_window import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM
 
         # cant get attn_weights from flash-attn
         LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
+        LlamaModel.forward = LlamaRPCModel.forward
+        LlamaForCausalLM.prepare_inputs_for_generation = LlamaRPCForCausalLM.prepare_inputs_for_generation
 
         QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
         Qwen2ForCausalLM.prepare_inputs_for_generation = Qwen2RPCForCausalLM.prepare_inputs_for_generation
 
     elif mode == "ours_window_merge":
-        from rpc.llama.llama_custom import LlamaRPCAttention
+        from rpc.llama.llama_custom_window_merge_old import LlamaRPCAttention, LlamaRPCModel, LlamaRPCForCausalLM
         from rpc.qwen2.qwen2_custom_window_merge_old import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM
 
         # cant get attn_weights from flash-attn
         LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
+        LlamaModel.forward = LlamaRPCModel.forward
+        LlamaForCausalLM.prepare_inputs_for_generation = LlamaRPCForCausalLM.prepare_inputs_for_generation
 
         QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
         Qwen2ForCausalLM.prepare_inputs_for_generation = Qwen2RPCForCausalLM.prepare_inputs_for_generation
 
     elif mode == "ours_window_merge_rkv":
-        from rpc.llama.llama_custom import LlamaRPCAttention
+        from rpc.llama.llama_custom_window_merge_old_rkv import LlamaRPCAttention, LlamaRPCModel, LlamaRPCForCausalLM
         from rpc.qwen2.qwen2_custom_window_merge_old_rkv import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM
 
         # cant get attn_weights from flash-attn
         LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
+        LlamaModel.forward = LlamaRPCModel.forward
+        LlamaForCausalLM.prepare_inputs_for_generation = LlamaRPCForCausalLM.prepare_inputs_for_generation
+        
 
         QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
         Qwen2ForCausalLM.prepare_inputs_for_generation = Qwen2RPCForCausalLM.prepare_inputs_for_generation
 
     elif mode == "ours_window_merge_new":
-        from rpc.llama.llama_custom import LlamaRPCAttention
+        from rpc.llama.llama_custom_window_merge import LlamaRPCAttention, LlamaRPCModel, LlamaRPCForCausalLM
         from rpc.qwen2.qwen2_custom_window_merge import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM
 
         # cant get attn_weights from flash-attn
         LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
+        LlamaModel.forward = LlamaRPCModel.forward
+        LlamaForCausalLM.prepare_inputs_for_generation = LlamaRPCForCausalLM.prepare_inputs_for_generation
 
         QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
