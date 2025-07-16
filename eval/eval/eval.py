@@ -6,7 +6,6 @@ import os
 from math_opensource import compute_scores as compute_scores_math_opensource
 from livecodebench_v5 import compute_scores as compute_scores_livecodebench_v5
 from ifeval import compute_scores as compute_scores_ifeval
-from gsm8k import compute_scores as compute_scores_gsm8k
 
 def get_after_think(text):
     parts = text.split("\n</think>\n\n", 1)
@@ -18,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate model outputs")
     parser.add_argument("--input_path", type=str, required=True, help="Path to input jsonl file")
     parser.add_argument("--cache_path", type=str, required=True, help="Path to save cache results")
-    parser.add_argument("--task_name", type=str, required=True, help="Task should be in ['math_opensource/aime24', 'math_opensource/aime25' ,'livecodebench', 'ifeval']")
+    parser.add_argument("--task_name", type=str, required=True, help="Task should be in ['math_opensource/aime24', 'math_opensource/aime25' , 'openai/gsm8k', livecodebench', 'ifeval']")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.cache_path), exist_ok=True)
@@ -39,7 +38,7 @@ def main():
         acc = compute_scores_ifeval(data, args.cache_path)
         print(f"Task: {args.task_name}, Strict_prompt_acc: {acc}")
     elif "gsm8k" in args.task_name:
-        acc = compute_scores_gsm8k(data, args.cache_path)
+        acc = compute_scores_math_opensource(data, args.cache_path)
         print(f"Task: {args.task_name}, Accuracy: {acc}")
     else:
         print(f"No evaluation function found for task name: {args.task_name}")
