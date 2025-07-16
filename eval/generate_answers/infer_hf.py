@@ -321,7 +321,7 @@ if __name__ == "__main__":
             for _ in range(remaining):
                 expanded_data.append(copy.deepcopy(item))
     elif task == "gsm8k":
-        data = data['train'].select(range(600))
+        data = data['test']
         for item in data:
             prompt = item['question']
             completed = completed_counts.get(prompt, 0)
