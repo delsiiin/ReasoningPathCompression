@@ -1,19 +1,19 @@
 # "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 # "Qwen/QwQ/-32B"
 
-MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+MODEL=/home/yangx/DeepSeek-R1-Distill-Qwen-7B
 MODEL_NICKNAME=r1-7b # qwq
 N_SAMPLES=4
-BSZ=8
+BSZ=1
 GPU_DEVICES=0,1,2,3
 
 # full kv caches
-CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python -m eval.generate_answers.infer_hf \
-        --data_path "/home/yangx/ReasoningPathCompression/datasets/livecodebench/livecodebench_v5.jsonl" \
-        --output_file "eval/outputs/$MODEL_NICKNAME/livebenchcode-b-$BSZ-s-$N_SAMPLES-full.jsonl" \
-        --n_samples $N_SAMPLES \
-        --batch_size $BSZ \
-        --model_path $MODEL --data_parallel
+# CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python -m eval.generate_answers.infer_hf \
+#         --data_path "/home/yangx/ReasoningPathCompression/datasets/livecodebench/livecodebench_v5.jsonl" \
+#         --output_file "eval/outputs/$MODEL_NICKNAME/livecodebench-b-$BSZ-s-$N_SAMPLES-full.jsonl" \
+#         --n_samples $N_SAMPLES \
+#         --batch_size $BSZ \
+#         --model_path $MODEL --data_parallel
 
 
 # rpc
@@ -26,7 +26,7 @@ MODE=rpc
 
 CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python -m eval.generate_answers.infer_hf \
         --data_path "/home/yangx/ReasoningPathCompression/datasets/livecodebench/livecodebench_v5.jsonl" \
-        --output_file "eval/outputs/$MODEL_NICKNAME/livebenchcode_b-$BSZ-s-$N_SAMPLES-$P-$R-$c-$SELECTORS-$AGGREGATION-$MODE.jsonl" \
+        --output_file "eval/outputs/$MODEL_NICKNAME/livecodebench_b-$BSZ-s-$N_SAMPLES-$P-$R-$c-$SELECTORS-$AGGREGATION-$MODE.jsonl" \
         --n_samples $N_SAMPLES \
         --batch_size $BSZ \
         --model_path $MODEL \
@@ -68,7 +68,7 @@ MODE=ours_window_merge_new
 
 CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python -m eval.generate_answers.infer_hf \
         --data_path "/home/yangx/ReasoningPathCompression/datasets/livecodebench/livecodebench_v5.jsonl" \
-        --output_file "eval/outputs/$MODEL_NICKNAME/livebenchcode-b-$BSZ-s-$N_SAMPLES-$BUDGET_COT-$BUDGET_ANS-$c-$AGGREGATION-$MODE.jsonl" \
+        --output_file "eval/outputs/$MODEL_NICKNAME/livecodebench-b-$BSZ-s-$N_SAMPLES-$BUDGET_COT-$BUDGET_ANS-$c-$AGGREGATION-$MODE.jsonl" \
         --n_samples $N_SAMPLES \
         --batch_size $BSZ \
         --model_path $MODEL \
