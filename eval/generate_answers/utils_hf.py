@@ -42,10 +42,12 @@ def count_completed_samples(output_file, task):
             for line in f:
                 try:
                     item = json.loads(line)
-                    if task == "aime" or task == "math500" or task == "ifeval" or task == "livecodebench":
+                    if task == "aime" or task == "ifeval" or task == "livecodebench":
                         prompt = item['prompt']
                     elif task == "gsm8k" or task == "gpqa":
                         prompt = item['question']
+                    elif task == "math500":
+                        prompt = item['problem']
                     elif task == "bbh":
                         prompt = item['input']
                     gen_count = len(item.get('gen', []))
@@ -66,10 +68,12 @@ def batched_generate(
     top_k: int = 40,
     task=None
 ):   
-    if task == "aime" or task == "math500" or task == "ifeval" or task == "livecodebench":
+    if task == "aime" or task == "ifeval" or task == "livecodebench":
         template_prompts = [apply_chat_template(tokenizer, d['prompt']) for d in batch_dicts]
     elif task == "gsm8k" or task == "gpqa":
         template_prompts = [apply_chat_template(tokenizer, d['question']) for d in batch_dicts]
+    elif task == "math500":
+        template_prompts = [apply_chat_template(tokenizer, d['problem']) for d in batch_dicts]
     elif "bbh" in task:
         key = task.split("/")[-1]
         template_prompts = [apply_chat_template(tokenizer, BBH_INSTRUCTIONS[key] + "\nQ: " + d['input'] + "\nA: Let's think step by step.") for d in batch_dicts]
