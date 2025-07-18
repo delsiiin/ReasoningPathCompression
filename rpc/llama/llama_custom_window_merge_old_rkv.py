@@ -5,12 +5,12 @@ from typing import List, Optional, Tuple, Union
 import warnings
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from .qwen2_vanilla import (
+from .llama_vanilla import (
     apply_rotary_pos_emb,
     repeat_kv,
-    Qwen2Attention,
-    Qwen2Model,
-    Qwen2ForCausalLM,
+    LlamaAttention,
+    LlamaModel,
+    LlamaForCausalLM,
     _prepare_4d_causal_attention_mask_with_cache_position
 )
 from transformers.utils import (
@@ -20,7 +20,6 @@ from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from rpc.rpc_utils_window_merge_old_rkv import init_rpc
 
 import math
-import numpy as np
 
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
@@ -41,13 +40,6 @@ from transformers.utils import (
 
 logger = logging.get_logger(__name__)
 
-def calculate_entropy(attention_scores):
-    attention_scores = attention_scores.to(torch.float32)
-    entropy = -torch.sum(attention_scores * torch.log(attention_scores + 1e-10))  
-    entropy= entropy.to(dtype=torch.float32)
-    return entropy
-
-
 def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     将 (batch, num_attention_heads, seqlen, head_dim) 的张量还原为 
@@ -60,12 +52,8 @@ def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     num_key_value_heads = num_attention_heads // n_rep
     return hidden_states.view(batch, num_key_value_heads, n_rep, seqlen, head_dim)[:, :, 0, :, :]
 
-class Qwen2RPCAttention(Qwen2Attention):
-    """
-    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
-    and "Generating Long Sequences with Sparse Transformers".
-    """
 
+class LlamaRPCAttention(LlamaAttention):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         init_rpc(self)
@@ -78,18 +66,17 @@ class Qwen2RPCAttention(Qwen2Attention):
         self.row_sum_accu = None
         self.col_sum_accu = None
 
-        self.question_cache = None
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -124,7 +111,6 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.kv_cluster.threshold = None
                 self.row_sum_accu = None
                 self.col_sum_accu = None
-                self.layer_budget_importance = None
                 self.cache_mode = "compression"
                 self.question_cache = query_states
                 if hasattr(self, "_cot_done_printed"):
@@ -209,6 +195,18 @@ class Qwen2RPCAttention(Qwen2Attention):
                     self.kv_cluster.num_comp += 1
             
             else:
+                
+                if self.config.mode == "dynamic_layer_budget":
+                    self.layer_budget_importance = attn_weights[..., :self.kv_cluster.prompt_len, :self.kv_cluster.prompt_len].sum(dim=-2).var(dim=-1).mean(dim=0) # refer to D2O (针对单样本复制多个打batch，不支持不同输入打batch)
+
+                    var_max = self.layer_budget_importance.max()
+                    var_min = self.layer_budget_importance.min()
+
+                    self.layer_budget_importance = (self.layer_budget_importance - var_min) / (var_max - var_min + 1e-6)
+
+                    self.layer_budget_importance = self.layer_budget_importance.mean(1) 
+                else:
+                    pass
 
                 # upcast attention to fp32
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -217,10 +215,6 @@ class Qwen2RPCAttention(Qwen2Attention):
 
                 if self.layer_idx == 0:
                     print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
-
-                if "dynamic" in self.config.mode:
-                    self.layer_budget_importance = calculate_entropy(attn_weights) # refer to D2O (针对单样本复制多个打batch，不支持不同输入打batch)
-                    
 
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -238,9 +232,9 @@ class Qwen2RPCAttention(Qwen2Attention):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
-    
 
-class Qwen2RPCModel(Qwen2Model):
+
+class LlamaRPCModel(LlamaModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2DecoderLayer`]
 
@@ -323,7 +317,7 @@ class Qwen2RPCModel(Qwen2Model):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        if "dynamic" in self.config.mode:
+        if self.config.mode == "dynamic_layer_budget":
             layer_budget_allocator = []
 
         for decoder_layer in self.layers:
@@ -354,9 +348,8 @@ class Qwen2RPCModel(Qwen2Model):
                     position_embeddings=position_embeddings,
                 )
 
-            if "dynamic" in self.config.mode and decoder_layer.self_attn.layer_budget_importance is not None:
+            if hidden_states.shape[-2] > 1 and self.config.mode == "dynamic_layer_budget":
                 layer_budget_allocator.append(decoder_layer.self_attn.layer_budget_importance)
-                decoder_layer.self_attn.layer_budget_importance = None
 
             hidden_states = layer_outputs[0]
 
@@ -368,18 +361,20 @@ class Qwen2RPCModel(Qwen2Model):
 
         hidden_states = self.norm(hidden_states)
 
-        if "dynamic" in self.config.mode and len(layer_budget_allocator) != 0:
+        if hidden_states.shape[-2] > 1 and self.config.mode == "dynamic_layer_budget":
 
-            if hidden_states.shape[-2] > 1:
-                self.total_kv_size = self.layers[0].self_attn.kv_cluster.budget_cot*len(self.layers)
+            layer_budget_allocator = torch.stack(layer_budget_allocator)
 
-                layer_budgets = [int(pref_score/sum(layer_budget_allocator)*self.total_kv_size) for pref_score in layer_budget_allocator]
-                
-                # layer_budgets = adjust_budgets(layer_budgets, self.total_kv_size, seq_len-self.window_size,  self.num_layers)
+            weights = torch.softmax(-layer_budget_allocator, dim=0)
 
-                for idx, decoder_layer in enumerate(self.layers):
-                    decoder_layer.self_attn.kv_cluster.budget_cot = layer_budgets[idx]
+            layer_budgets = weights
 
+            layer_budgets = torch.clamp(layer_budgets, min=0.01, max=1.0)
+
+            for idx, decoder_layer in enumerate(self.layers):
+                decoder_layer.self_attn.kv_cluster.cp_ratio = layer_budgets[idx]
+                decoder_layer.self_attn.kv_cluster.cp_cot = layer_budgets[idx] * decoder_layer.self_attn.kv_cluster.budget_cot
+                decoder_layer.self_attn.kv_cluster.cp_ans = layer_budgets[idx] * decoder_layer.self_attn.kv_cluster.budget_ans
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -398,8 +393,7 @@ class Qwen2RPCModel(Qwen2Model):
             attentions=all_self_attns,
         )
     
-
-class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
+class LlamaRPCForCausalLM(LlamaForCausalLM):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -444,7 +438,7 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
             model_inputs = {"input_ids": input_ids.clone(memory_format=torch.contiguous_format), "inputs_embeds": None}
 
         ###################################################################
-        if 151649 in model_inputs["input_ids"]: # check for </> token
+        if 128014 in model_inputs["input_ids"]: # check for </> token
             
             for layer in self.model.layers:
                 layer.self_attn.cache_mode = "vanilla"
