@@ -23,7 +23,7 @@ def replace_llama(compression_config):
         LlamaAttention_init(self, config, layer_idx, compression_config)
 
     modeling_llama.LlamaAttention.__init__ = init_wrapper
-    modeling_llama.LlamaAttention.forward = LlamaAttention_forward
+    modeling_llama.LlamaFlashAttention2.forward = LlamaAttention_forward
     modeling_llama.LlamaForCausalLM.forward = CausalLM_forward
 
 
@@ -32,7 +32,7 @@ def replace_qwen2(compression_config):
         Qwen2Attention_init(self, config, layer_idx, compression_config)
 
     modeling_qwen2.Qwen2Attention.__init__ = init_wrapper
-    modeling_qwen2.Qwen2Attention.forward = Qwen2Attention_forward
+    modeling_qwen2.Qwen2FlashAttention2.forward = Qwen2Attention_forward
     modeling_qwen2.Qwen2ForCausalLM.forward = CausalLM_forward
 
 # def replace_qwen3(compression_config):

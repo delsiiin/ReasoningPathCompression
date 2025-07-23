@@ -26,6 +26,8 @@ from rpc.llama.llama_vanilla import LlamaForCausalLM
 from rpc.qwen2.qwen2_config import Qwen2Config
 from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
+from rkv.monkeypatch import replace_llama, replace_qwen2
+
 def gen_result_dp(data, total_tasks, top_k, rank, task, args):
     
     device = torch.device(f'cuda:{rank}')
@@ -33,7 +35,7 @@ def gen_result_dp(data, total_tasks, top_k, rank, task, args):
     if args.rpc:
         enable_rpc(args.mode)
 
-    if args.mode == "rpc" or args.mode == "rkc" or args.mode is None:
+    if args.mode == "rpc" or args.mode == "rkv" or args.mode is None:
         attn_implementation = 'flash_attention_2'
     else:
         attn_implementation = 'eager'
@@ -41,52 +43,115 @@ def gen_result_dp(data, total_tasks, top_k, rank, task, args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.padding_side = 'left'
 
-    if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
-        config = Qwen2Config.from_pretrained(args.model_path)
-        config.update({'mode':args.mode})
-        config.update({'divide_method':args.divide_method})
-        model = Qwen2ForCausalLM.from_pretrained(
+    if args.mode != "rkv":
+        if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
+            config = Qwen2Config.from_pretrained(args.model_path)
+            config.update({'mode':args.mode})
+            config.update({'divide_method':args.divide_method})
+            model = Qwen2ForCausalLM.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config
+            ).to(device)
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.CoT_done_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
+        elif "llama" in args.model_path.lower():
+            config = LlamaConfig.from_pretrained(args.model_path)
+            config.update({'mode':args.mode})
+            config.update({'divide_method':args.divide_method})
+            model = LlamaForCausalLM.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config
+            ).to(device)
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.CoT_done_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
+    else:
+        # ====== build compression config ======
+        compression_config = {
+            "method": args.mode,
+            "method_config": {
+                "budget": args.buffer_cot,
+                "window_size": 8,
+                "mix_lambda": 0.07,
+                "retain_ratio": 0.2,
+                "retain_direction": "last",
+                "first_tokens": 4,
+            },
+            "compression": None,
+            "update_kv": True
+        }
+        model_config = {
+            "divide_method": "step_length",
+            "divide_length": 128,
+            "compression_content": "think",
+        }
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_path, use_fast=True, padding_side="left"
+        )
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        # apply monkey patch
+        if args.mode.lower() != "fullkv":
+            if "llama" in args.model_path.lower():
+                replace_llama(compression_config)
+            elif "qwen" in args.model_path.lower():
+                replace_qwen2(compression_config)
+            else:
+                raise ValueError(f"Unsupported model: {args.model_path}")
+
+        model = AutoModelForCausalLM.from_pretrained(
             args.model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
+            use_cache=True,
             attn_implementation=attn_implementation,
-            config=config
         ).to(device)
-        model.newline_token_ids = [
-            tokenizer.encode("\n")[-1],
-            tokenizer.encode(".\n")[-1],
-            tokenizer.encode(")\n")[-1],
-            tokenizer.encode("\n\n")[-1],
-            tokenizer.encode(".\n\n")[-1],
-            tokenizer.encode(")\n\n")[-1],
-        ]
+        model.eval()
 
-        model.CoT_done_token_ids = [
-            tokenizer.encode("</think>")[-1],
-        ]
-    elif "llama" in args.model_path.lower():
-        config = LlamaConfig.from_pretrained(args.model_path)
-        config.update({'mode':args.mode})
-        config.update({'divide_method':args.divide_method})
-        model = LlamaForCausalLM.from_pretrained(
-            args.model_path,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            attn_implementation=attn_implementation,
-            config=config
-        ).to(device)
-        model.newline_token_ids = [
-            tokenizer.encode("\n")[-1],
-            tokenizer.encode(".\n")[-1],
-            tokenizer.encode(")\n")[-1],
-            tokenizer.encode("\n\n")[-1],
-            tokenizer.encode(".\n\n")[-1],
-            tokenizer.encode(")\n\n")[-1],
-        ]
+        model.config.update(model_config)
 
-        model.CoT_done_token_ids = [
-            tokenizer.encode("</think>")[-1],
-        ]
+        if args.mode.lower() != "fullkv":
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.after_think_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
     
 
     if args.rpc: 
@@ -105,6 +170,8 @@ def gen_result_dp(data, total_tasks, top_k, rank, task, args):
                             mode=args.mode
                             )
 
+    elif args.mode == "rkv":
+        print(f"RKV Cache Inference")
     else:
         print(f"Full KV Cache Inference")
 
@@ -136,7 +203,7 @@ def gen_result(data, total_tasks, top_k, task, args):
     if args.rpc:
         enable_rpc(args.mode)
 
-    if args.mode == "rpc" or args.mode is None:
+    if args.mode == "rpc" or args.mode == "rkv" or args.mode is None:
         attn_implementation = 'flash_attention_2'
     else:
         attn_implementation = 'eager'
@@ -144,54 +211,119 @@ def gen_result(data, total_tasks, top_k, task, args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.padding_side = 'left'
 
-    if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
-        config = Qwen2Config.from_pretrained(args.model_path)
-        config.update({'mode':args.mode})
-        config.update({'divide_method':args.divide_method})
-        model = Qwen2ForCausalLM.from_pretrained(
+    if args.mode != "rkv":
+        if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
+            config = Qwen2Config.from_pretrained(args.model_path)
+            config.update({'mode':args.mode})
+            config.update({'divide_method':args.divide_method})
+            model = Qwen2ForCausalLM.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.CoT_done_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
+        elif "llama" in args.model_path.lower():
+            config = LlamaConfig.from_pretrained(args.model_path)
+            config.update({'mode':args.mode})
+            config.update({'divide_method':args.divide_method})
+            model = LlamaForCausalLM.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.CoT_done_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
+    else:
+
+        # ====== build compression config ======
+        compression_config = {
+            "method": args.mode,
+            "method_config": {
+                "budget": args.buffer_cot,
+                "window_size": 8,
+                "mix_lambda": 0.07,
+                "retain_ratio": 0.2,
+                "retain_direction": "last",
+                "first_tokens": 4,
+            },
+            "compression": None,
+            "update_kv": True
+        }
+        model_config = {
+            "divide_method": "step_length",
+            "divide_length": 128,
+            "compression_content": "think",
+        }
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_path, use_fast=True, padding_side="left"
+        )
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        # apply monkey patch
+        if args.mode.lower() != "fullkv":
+            if "llama" in args.model_path.lower():
+                replace_llama(compression_config)
+            elif "qwen" in args.model_path.lower():
+                replace_qwen2(compression_config)
+            else:
+                raise ValueError(f"Unsupported model: {args.model_path}")
+
+        model = AutoModelForCausalLM.from_pretrained(
             args.model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
+            device_map="auto",
+            use_cache=True,
             attn_implementation=attn_implementation,
-            config=config,
-            device_map="auto"
         )
-        model.newline_token_ids = [
-            tokenizer.encode("\n")[-1],
-            tokenizer.encode(".\n")[-1],
-            tokenizer.encode(")\n")[-1],
-            tokenizer.encode("\n\n")[-1],
-            tokenizer.encode(".\n\n")[-1],
-            tokenizer.encode(")\n\n")[-1],
-        ]
+        model.eval()
 
-        model.CoT_done_token_ids = [
-            tokenizer.encode("</think>")[-1],
-        ]
-    elif "llama" in args.model_path.lower():
-        config = LlamaConfig.from_pretrained(args.model_path)
-        config.update({'mode':args.mode})
-        config.update({'divide_method':args.divide_method})
-        model = LlamaForCausalLM.from_pretrained(
-            args.model_path,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            attn_implementation=attn_implementation,
-            config=config,
-            device_map="auto"
-        )
-        model.newline_token_ids = [
-            tokenizer.encode("\n")[-1],
-            tokenizer.encode(".\n")[-1],
-            tokenizer.encode(")\n")[-1],
-            tokenizer.encode("\n\n")[-1],
-            tokenizer.encode(".\n\n")[-1],
-            tokenizer.encode(")\n\n")[-1],
-        ]
+        model.config.update(model_config)
 
-        model.CoT_done_token_ids = [
-            tokenizer.encode("</think>")[-1],
-        ]
+        if args.mode.lower() != "fullkv":
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.after_think_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
 
     if args.rpc: 
         set_rpc_config(model=model,
@@ -208,7 +340,8 @@ def gen_result(data, total_tasks, top_k, task, args):
                             cp_ratio=args.cp_ratio,
                             mode=args.mode
                             )
-
+    elif args.mode == "rkv":
+        print(f"RKV Cache Inference")
     else:
         print(f"Full KV Cache Inference")
 
