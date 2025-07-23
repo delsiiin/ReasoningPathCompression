@@ -26,27 +26,27 @@ from rpc.llama.llama_vanilla import LlamaForCausalLM
 from rpc.qwen2.qwen2_config import Qwen2Config
 from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
-def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, rank, task, budget_cot, buffer_cot, budget_ans, cp_ratio, mode, divide_method):
+def gen_result_dp(data, total_tasks, top_k, rank, task, args):
     
     device = torch.device(f'cuda:{rank}')
 
-    if rpc:
-        enable_rpc(mode)
+    if args.rpc:
+        enable_rpc(args.mode)
 
-    if mode == "rpc" or mode is None:
+    if args.mode == "rpc" or args.mode == "rkc" or args.mode is None:
         attn_implementation = 'flash_attention_2'
     else:
         attn_implementation = 'eager'
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.padding_side = 'left'
 
-    if "qwen" in model_path.lower() or "qwq" in model_path.lower():
-        config = Qwen2Config.from_pretrained(model_path)
-        config.update({'mode':mode})
-        config.update({'divide_method':divide_method})
+    if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
+        config = Qwen2Config.from_pretrained(args.model_path)
+        config.update({'mode':args.mode})
+        config.update({'divide_method':args.divide_method})
         model = Qwen2ForCausalLM.from_pretrained(
-            model_path,
+            args.model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             attn_implementation=attn_implementation,
@@ -64,12 +64,12 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
         model.CoT_done_token_ids = [
             tokenizer.encode("</think>")[-1],
         ]
-    elif "llama" in model_path.lower():
-        config = LlamaConfig.from_pretrained(model_path)
-        config.update({'mode':mode})
-        config.update({'divide_method':divide_method})
+    elif "llama" in args.model_path.lower():
+        config = LlamaConfig.from_pretrained(args.model_path)
+        config.update({'mode':args.mode})
+        config.update({'divide_method':args.divide_method})
         model = LlamaForCausalLM.from_pretrained(
-            model_path,
+            args.model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             attn_implementation=attn_implementation,
@@ -89,28 +89,28 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
         ]
     
 
-    if rpc: 
+    if args.rpc: 
         set_rpc_config(model=model,
-                            P=P,
-                            R=R,
-                            c=c,
-                            selectors=selectors,
-                            aggregation=aggregation,
-                            kernel_size=kernel_size,
-                            pooling=pooling,
-                            budget_cot=budget_cot,
-                            buffer_cot=buffer_cot,
-                            budget_ans=budget_ans,
-                            cp_ratio=cp_ratio,
-                            mode=mode
+                            P=args.P,
+                            R=args.R,
+                            c=args.c,
+                            selectors=args.selectors,
+                            aggregation=args.aggregation,
+                            kernel_size=args.kernel_size,
+                            pooling=args.pooling,
+                            budget_cot=args.budget_cot,
+                            buffer_cot=args.buffer_cot,
+                            budget_ans=args.budget_ans,
+                            cp_ratio=args.cp_ratio,
+                            mode=args.mode
                             )
 
     else:
         print(f"Full KV Cache Inference")
 
-    for i in track(range(0, len(data), batch_size)):
+    for i in track(range(0, len(data), args.batch_size)):
 
-        batch_dicts = data[i : i + batch_size] 
+        batch_dicts = data[i : i + args.batch_size] 
 
         processing = len(batch_dicts)
         # print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
@@ -119,9 +119,9 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
         batched_generate(
             model=model,
             tokenizer=tokenizer,
-            output_file=output_file,
+            output_file=args.output_file,
             batch_dicts=batch_dicts,
-            batch_size=batch_size,
+            batch_size=args.batch_size,
             max_new_tokens=32768,
             temperature=0.6,
             top_p=0.95,
@@ -131,25 +131,25 @@ def gen_result_dp(data, batch_size, total_tasks, model_path, rpc, P, R, c, selec
 
         total_tasks -= processing
 
-def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selectors, aggregation, kernel_size, pooling, output_file, top_k, task, budget_cot, buffer_cot, budget_ans, cp_ratio, mode, divide_method):
+def gen_result(data, total_tasks, top_k, task, args):
     
-    if rpc:
-        enable_rpc(mode)
+    if args.rpc:
+        enable_rpc(args.mode)
 
-    if mode == "rpc" or mode is None:
+    if args.mode == "rpc" or args.mode is None:
         attn_implementation = 'flash_attention_2'
     else:
         attn_implementation = 'eager'
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.padding_side = 'left'
 
-    if "qwen" in model_path.lower() or "qwq" in model_path.lower():
-        config = Qwen2Config.from_pretrained(model_path)
-        config.update({'mode':mode})
-        config.update({'divide_method':divide_method})
+    if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
+        config = Qwen2Config.from_pretrained(args.model_path)
+        config.update({'mode':args.mode})
+        config.update({'divide_method':args.divide_method})
         model = Qwen2ForCausalLM.from_pretrained(
-            model_path,
+            args.model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             attn_implementation=attn_implementation,
@@ -168,12 +168,12 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
         model.CoT_done_token_ids = [
             tokenizer.encode("</think>")[-1],
         ]
-    elif "llama" in model_path.lower():
-        config = LlamaConfig.from_pretrained(model_path)
-        config.update({'mode':mode})
-        config.update({'divide_method':divide_method})
+    elif "llama" in args.model_path.lower():
+        config = LlamaConfig.from_pretrained(args.model_path)
+        config.update({'mode':args.mode})
+        config.update({'divide_method':args.divide_method})
         model = LlamaForCausalLM.from_pretrained(
-            model_path,
+            args.model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             attn_implementation=attn_implementation,
@@ -193,28 +193,28 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
             tokenizer.encode("</think>")[-1],
         ]
 
-    if rpc: 
+    if args.rpc: 
         set_rpc_config(model=model,
-                            P=P,
-                            R=R,
-                            c=c,
-                            selectors=selectors,
-                            aggregation=aggregation,
-                            kernel_size=kernel_size,
-                            pooling=pooling,
-                            budget_cot=budget_cot,
-                            buffer_cot=buffer_cot,
-                            budget_ans=budget_ans,
-                            cp_ratio=cp_ratio,
-                            mode=mode
+                            P=args.P,
+                            R=args.R,
+                            c=args.c,
+                            selectors=args.selectors,
+                            aggregation=args.aggregation,
+                            kernel_size=args.kernel_size,
+                            pooling=args.pooling,
+                            budget_cot=args.budget_cot,
+                            buffer_cot=args.buffer_cot,
+                            budget_ans=args.budget_ans,
+                            cp_ratio=args.cp_ratio,
+                            mode=args.mode
                             )
 
     else:
         print(f"Full KV Cache Inference")
 
-    for i in track(range(0, len(data), batch_size)):
+    for i in track(range(0, len(data), args.batch_size)):
 
-        batch_dicts = data[i : i + batch_size] 
+        batch_dicts = data[i : i + args.batch_size] 
 
         processing = len(batch_dicts)
         print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
@@ -223,9 +223,9 @@ def gen_result(data, batch_size, total_tasks, model_path, rpc, P, R, c, selector
         batched_generate(
             model=model,
             tokenizer=tokenizer,
-            output_file=output_file,
+            output_file=args.output_file,
             batch_dicts=batch_dicts,
-            batch_size=batch_size,
+            batch_size=args.batch_size,
             max_new_tokens=32768,
             temperature=0.6,
             top_p=0.95,
@@ -366,7 +366,7 @@ if __name__ == "__main__":
 
         processes = []
         for rank in range(world_size):
-            p = mp.Process(target=gen_result_dp, args=(data_subsets[rank], args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, rank, task, args.budget_cot, args.buffer_cot, args.budget_ans, args.cp_ratio, args.mode, args.divide_method))
+            p = mp.Process(target=gen_result_dp, args=(data_subsets[rank], total_tasks, top_k, rank, task, args))
 
             p.start()
 
@@ -377,7 +377,7 @@ if __name__ == "__main__":
     
     else:
 
-        gen_result(expanded_data, args.batch_size, total_tasks, args.model_path, args.rpc, args.P, args.R, args.c, args.selectors, args.aggregation, args.kernel_size, args.pooling, args.output_file, top_k, task, args.budget_cot, args.buffer_cot, args.budget_ans, args.cp_ratio, args.mode, args.divide_method)
+        gen_result(expanded_data, total_tasks, top_k, task, args)
 
 
     
