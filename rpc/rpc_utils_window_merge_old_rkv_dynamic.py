@@ -103,7 +103,7 @@ class RPCCluster():
         # support gqa
         self.aggregation = aggregation
         self.num_key_value_groups = num_key_value_groups
-        self.agg_func = 'max'
+        self.agg_func = 'mean'
 
         
     def cache_recent(self, current_query_states):
