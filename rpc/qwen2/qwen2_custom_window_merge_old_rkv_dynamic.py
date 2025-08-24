@@ -173,7 +173,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                             prev_col_sum = self.col_sum_accu
                             if prev_col_sum.shape[-1] != partial_attn_weights.shape[-1]:
                                 self.col_sum_accu = partial_attn_weights
-                                self.offset = self.R
+                                self.offset = self.kv_cluster.R
                             else:
                                 self.col_sum_accu = prev_col_sum + partial_attn_weights
                     except Exception as e:
