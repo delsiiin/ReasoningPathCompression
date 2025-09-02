@@ -32,7 +32,7 @@ import json
 # Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?
 
 def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-            rpc: bool = True,
+            rpc: bool = False,
             max_new_tokens: int = 32768,
             # RPC arguments
             P=4096,

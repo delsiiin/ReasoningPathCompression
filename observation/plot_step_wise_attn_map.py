@@ -226,6 +226,7 @@ def main():
     if args.show_plot:
         plt.show()
 
+    os.makedirs(args.output_dir, exist_ok=True)
     plt.savefig(f'{args.output_dir}/step_size_layer_{args.layer_id}.pdf', bbox_inches='tight', dpi=300)
     print(f"热力图已保存至: {args.output_dir}/layer_{args.layer_id}.pdf")
     plt.close()

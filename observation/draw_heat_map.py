@@ -24,7 +24,7 @@ def draw_heat_map(model, num_layers):
         plt.show()
 
         import os
-        folder_path = f'/home/yangx/ReasoningPathCompression/observation/attn_heat_map/{model}'
+        folder_path = f'/home/yangx/ReasoningPathCompression/observation/attn_heat_map/token_wise/{model}'
         os.makedirs(folder_path, exist_ok=True)
 
         plt.savefig(f"{folder_path}/{layer_idx}.pdf")

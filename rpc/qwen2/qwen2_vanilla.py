@@ -374,14 +374,10 @@ class Qwen2Attention(nn.Module):
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-
         if self.config.mode == "heatmap":
 
             import os
-            folder_path = '/home/yangx/ReasoningPathCompression/attn_heat_map/qwen2'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/qwen2'
             os.makedirs(folder_path, exist_ok=True)
 
             # 设置保存路径
@@ -412,6 +408,9 @@ class Qwen2Attention(nn.Module):
                 # 保存张量
                 torch.save(save_tgt, save_path)
 
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
 
         attn_output = torch.matmul(attn_weights, value_states)
 
@@ -1221,6 +1220,62 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         # TODO: remove the float() operation in v4.46
         logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
+
+        # Calculate information entropy of logits over vocabulary
+        if self.config.mode == "entropy":
+            import torch.nn.functional as F
+            
+            # Apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1)
+            
+            # Calculate entropy: H = -sum(p * log(p))
+            # Add small epsilon to avoid log(0)
+            epsilon = 1e-8
+            log_probs = torch.log(probs + epsilon)
+            entropy = -torch.sum(probs * log_probs, dim=-1)
+            
+            import os
+            # Save entropy to file
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/qwen2'
+            os.makedirs(folder_path, exist_ok=True)
+            save_path = f'{folder_path}/entropy.pt'
+
+            # Check if file exists and concatenate or create new
+            if os.path.exists(save_path):
+                existing_entropy = torch.load(save_path)
+                entropy = torch.cat([existing_entropy, entropy], dim=-1)
+
+            torch.save(entropy, save_path)
+
+        if self.config.mode == "confidence":
+            import torch.nn.functional as F
+            
+            # Get top-k probabilities
+            k = getattr(self.config, 'topk_size', 20)  # Default to top-20 if not specified
+
+            # Apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1)
+            
+            # Get top-k probabilities
+            topk_probs, _ = torch.topk(probs, k, dim=-1)
+            
+            # Calculate log of top-k probabilities and negative mean
+            epsilon = 1e-8  # Avoid log(0)
+            topk_log_probs = torch.log(topk_probs + epsilon)
+            neg_mean_topk_log_prob = -torch.mean(topk_log_probs, dim=-1)
+            
+            # Save to file
+            import os
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/qwen2'
+            os.makedirs(folder_path, exist_ok=True)
+            save_path = f'{folder_path}/confidence.pt'
+
+            # Check if file exists and concatenate or create new
+            if os.path.exists(save_path):
+                existing_data = torch.load(save_path)
+                neg_mean_topk_log_prob = torch.cat([existing_data, neg_mean_topk_log_prob], dim=-1)
+
+            torch.save(neg_mean_topk_log_prob, save_path)
 
         loss = None
         if labels is not None:
