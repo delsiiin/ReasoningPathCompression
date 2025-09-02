@@ -189,7 +189,7 @@ def main():
             end_idx = para_token_start_idx_list[idx+1]
             # Check if indices are within tensor bounds
             if end_i <= attn_score_tensor.shape[0] and end_idx <= attn_score_tensor.shape[1]:
-                para_attn_scores = attn_score_tensor[start_i:end_i, start_idx:end_idx].sum(0).mean(0)
+                para_attn_scores = attn_score_tensor[start_i:end_i, start_idx:end_idx].sum(1).mean(0)
                 cur_step_attn_score.append(para_attn_scores.item())
             else:
                 if args.verbose:
