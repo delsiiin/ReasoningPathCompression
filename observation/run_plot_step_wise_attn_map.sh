@@ -12,10 +12,10 @@ VMAX=${4:-0.05}
 # 根据模型设置tokenizer和attention目录
 if [ "$MODEL" = "qwen" ]; then
     TOKENIZER_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-    ATTN_DIR="/home/zmw/idea/context_compression/ReasoningPathCompression/observation/attn_heat_map/qwen2"
+    ATTN_DIR="attn_heat_map/step_wise/qwen2"
 elif [ "$MODEL" = "llama" ]; then
     TOKENIZER_NAME="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-    ATTN_DIR="/home/zmw/idea/context_compression/ReasoningPathCompression/observation/attn_heat_map/llama3"
+    ATTN_DIR="attn_heat_map/step_wise/llama3"
 else
     echo "错误: 不支持的模型 '$MODEL'. 请使用 'qwen' 或 'llama'"
     exit 1
