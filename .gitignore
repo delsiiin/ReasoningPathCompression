@@ -1,7 +1,9 @@
 __pycache__
 eval/eval_res
 eval/outputs
-attn_heat_map/
+observation/attn_heat_map/
+observation/token_entropy/
+observation/token_confidence/
 datasets/
 eval/profile/ca_ratios/
 eval/profile/grad_dir/

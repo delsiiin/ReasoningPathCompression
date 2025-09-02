@@ -11,6 +11,9 @@ from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 from rpc import enable_rpc, set_rpc_config
 from utils.apply_chat_template import apply_chat_template
 
+import json
+
+
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-7B"
 # "/home/yangx/QwQ-32B"
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -28,7 +31,7 @@ from utils.apply_chat_template import apply_chat_template
 # QwQ 32B
 # Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?
 
-def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
+def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             rpc: bool = True,
             max_new_tokens: int = 32768,
             # RPC arguments
@@ -122,6 +125,19 @@ def gen_example(model_path: str = "/home/yangx/DeepSeek-R1-Distill-Qwen-7B",
                                 streamer=streamer)
 
     output_length = outputs[0][context_length:].shape[-1]
+    decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
+
+    # Create data dictionary
+    data = {
+        "context_length": context_length,
+        "output_length": output_length,
+        "decoded_output": decoded_output
+    }
+
+    # Save to JSONL file
+    with open("/home/yangx/ReasoningPathCompression/observation/output.jsonl", "w", encoding="utf-8") as f:
+        f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
     print(f"\nContext Length: {context_length}")
     print(f"Output Length: {output_length}\n")
 
