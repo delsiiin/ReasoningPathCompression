@@ -377,10 +377,7 @@ class Qwen2Attention(nn.Module):
         if "heatmap" in self.config.mode:
 
             import os
-            if "induce_answer" in self.config.mode:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/attn_heat_map/qwen2'
-            else:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/qwen2'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/qwen2'
             os.makedirs(folder_path, exist_ok=True)
 
             # 设置保存路径
@@ -1239,10 +1236,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             
             import os
             # Save entropy to file
-            if "induce_answer" in self.config.mode:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/token_entropy/qwen2'
-            else:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/qwen2'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/qwen2'
             os.makedirs(folder_path, exist_ok=True)
             save_path = f'{folder_path}/entropy.pt'
 
@@ -1272,10 +1266,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             
             # Save to file
             import os
-            if "induce_answer" in self.config.mode:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/token_confidence/qwen2'
-            else:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/qwen2'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/qwen2'
             os.makedirs(folder_path, exist_ok=True)
             save_path = f'{folder_path}/confidence.pt'
 

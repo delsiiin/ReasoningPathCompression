@@ -425,10 +425,7 @@ class LlamaAttention(nn.Module):
         if "heatmap" in self.config.mode:
 
             import os
-            if "induce_answer" in self.config.mode:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/attn_heat_map/llama3'
-            else:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/llama3'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/llama3'
             os.makedirs(folder_path, exist_ok=True)
 
             # 设置保存路径
@@ -1265,11 +1262,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             entropy = -torch.sum(probs * log_probs, dim=-1)
             
             import os
-            # Save entropy to file
-            if "induce_answer" in self.config.mode:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/token_entropy/llama3'
-            else:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/llama3'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/llama3'
             os.makedirs(folder_path, exist_ok=True)
             save_path = f'{folder_path}/entropy.pt'
 
@@ -1299,10 +1292,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             
             # Save to file
             import os
-            if "induce_answer" in self.config.mode:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/token_confidence/llama3'
-            else:
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/llama3'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/llama3'
             os.makedirs(folder_path, exist_ok=True)
             save_path = f'{folder_path}/confidence.pt'
 
