@@ -5,6 +5,10 @@
 # 默认参数
 MODEL_TYPE="llama"
 INPUT_FILE="output.jsonl"
+# 如果提供了第二个参数作为压缩方法，使用它作为后缀
+if [ "$2" != "" ]; then
+    INPUT_FILE="output_$2.jsonl"
+fi
 
 # 如果提供了参数，使用用户参数
 if [ "$1" != "" ]; then
@@ -14,14 +18,26 @@ fi
 # 根据模型类型设置路径
 case "$MODEL_TYPE" in
     "llama")
-        TENSOR_PATH="token_confidence/llama3/confidence.pt"
+        # 如果提供了第二个参数作为压缩方法，使用它作为后缀
+        if [ "$2" != "" ]; then
+            TENSOR_PATH="token_confidence/llama3_$2/confidence.pt"
+            OUTPUT_PATH="token_confidence/llama3_$2/token_confidence.pdf"
+        else
+            TENSOR_PATH="token_confidence/llama3/confidence.pt"
+            OUTPUT_PATH="token_confidence/llama3/token_confidence.pdf"
+        fi
         TOKENIZER_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        OUTPUT_PATH="token_confidence/llama3/token_confidence.pdf"
         ;;
     "qwen")
-        TENSOR_PATH="token_confidence/qwen2/confidence.pt"
+        # 如果提供了第二个参数作为压缩方法，使用它作为后缀
+        if [ "$2" != "" ]; then
+            TENSOR_PATH="token_confidence/qwen2_$2/confidence.pt"
+            OUTPUT_PATH="token_confidence/qwen2_$2/token_confidence.pdf"
+        else
+            TENSOR_PATH="token_confidence/qwen2/confidence.pt"
+            OUTPUT_PATH="token_confidence/qwen2/token_confidence.pdf"
+        fi
         TOKENIZER_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-        OUTPUT_PATH="token_confidence/qwen2/token_confidence.pdf"
         ;;
     *)
         echo "错误: 不支持的模型类型 $MODEL_TYPE"
