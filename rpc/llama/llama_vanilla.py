@@ -422,10 +422,13 @@ class LlamaAttention(nn.Module):
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        if self.config.mode == "heatmap":
+        if "heatmap" in self.config.mode:
 
             import os
-            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/llama3'
+            if "induce_answer" in self.config.mode:
+                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/attn_heat_map/llama3'
+            else:
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/llama3'
             os.makedirs(folder_path, exist_ok=True)
 
             # 设置保存路径
@@ -1249,7 +1252,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
 
         # Calculate information entropy of logits over vocabulary
-        if self.config.mode == "entropy":
+        if "entropy" in self.config.mode:
             import torch.nn.functional as F
             
             # Apply softmax to get probabilities
@@ -1263,7 +1266,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             
             import os
             # Save entropy to file
-            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/llama3'
+            if "induce_answer" in self.config.mode:
+                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/token_entropy/llama3'
+            else:
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/llama3'
             os.makedirs(folder_path, exist_ok=True)
             save_path = f'{folder_path}/entropy.pt'
 
@@ -1274,7 +1280,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
             torch.save(entropy, save_path)
 
-        if self.config.mode == "confidence":
+        if "confidence" in self.config.mode:
             import torch.nn.functional as F
             
             # Get top-k probabilities
@@ -1293,7 +1299,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             
             # Save to file
             import os
-            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/llama3'
+            if "induce_answer" in self.config.mode:
+                folder_path = '/home/yangx/ReasoningPathCompression/observation_induce_answer/token_confidence/llama3'
+            else:
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/llama3'
             os.makedirs(folder_path, exist_ok=True)
             save_path = f'{folder_path}/confidence.pt'
 
