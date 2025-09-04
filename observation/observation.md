@@ -1,15 +1,33 @@
-# Generate Attetion Score Using Heatmap Mode
-CUDA_VISIBLE_DEVICES=0 python example.py --rpc False --mode heatmap --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+# Vanilla Inference Observation
+
+## Generate Attetion Score Using Heatmap Mode
+CUDA_VISIBLE_DEVICES=0 python example.py --mode heatmap --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 (Need to change the kv length in llama_vanilla.py)
 
-# Generate Token Entropy Using Entropy Mode
-CUDA_VISIBLE_DEVICES=0 python example.py --rpc False --mode entropy --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-(Need to change the kv length in llama_vanilla.py)
+## Generate Token Entropy Using Entropy Mode
+CUDA_VISIBLE_DEVICES=0 python example.py --mode entropy --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
-# Generate Token-wise Attention Map
+## Generate Token Confidence Using Entropy Mode
+CUDA_VISIBLE_DEVICES=0 python example.py --mode confidence --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
-# Generate Step-wise Attention Map
-./run_plot_step_wise_attn_map.sh llama 0 31 0.05
+## Generate Token-wise Attention Map
+python draw_heat_map.py --model llama --num_layers 32
 
-# Generate Token Entropy
+## Generate Step-wise Attention Map
+./run_plot_step_wise_attn_map.sh llama 0 31 0.1
+
+## Generate Token Entropy
 ./run_plot_token_entropy.sh llama
+
+## Generate Token Confidence
+./run_plot_token_confidence.sh llama
+
+
+
+# Compressed Inference Observation (streamingllm, h2o, snapkv, r-kv)
+
+## Generate Token Entropy Using Entropy Mode
+CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode entropy --rkv_budget 1024
+
+## Generate Token Confidence Using Entropy Mode
+CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode confidence --rkv_budget 1024

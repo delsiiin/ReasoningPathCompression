@@ -35,8 +35,8 @@ from rkv.monkeypatch import replace_llama, replace_qwen2
 def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             rpc: bool = False,
             rkv: bool = False,
-            rkv_mode: str = "rkv", # rkv, snapkv, h2o, streamingllm
-            rkv_budget: int = "4096",
+            rkv_mode: str = None, # rkv, snapkv, h2o, streamingllm
+            rkv_budget: int = 4096,
             max_new_tokens: int = 32768,
             # RPC arguments
             P=4096,
@@ -47,8 +47,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             budget_cot=4096,
             budget_ans=1024,
             cp_ratio=4.0,
-            mode=None,
-            save_output: bool = False
+            mode="none", # heatmap, entropy, confidence (if induce answer, set add "_induce_answer")
             ):
 
     attn_implementation = 'eager'
@@ -81,6 +80,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             "divide_method": "step_length",
             "divide_length": 128,
             "compression_content": "think",
+            "method": rkv_mode,
+            "mode": mode,
         }
 
         tokenizer = AutoTokenizer.from_pretrained(
@@ -200,7 +201,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
 
 
-    if save_output:
+    if rkv_mode:
         # Create data dictionary
         data = {
             "context_length": context_length,
@@ -208,8 +209,27 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             "decoded_output": decoded_output
         }
 
-        # Save to JSONL file
-        with open("/home/yangx/ReasoningPathCompression/observation/output.jsonl", "w", encoding="utf-8") as f:
+        # Create directory if it doesn't exist and save to JSONL file
+        import os
+        output_dir = "/home/yangx/ReasoningPathCompression/observation"
+        os.makedirs(output_dir, exist_ok=True)
+            
+        with open(f"{output_dir}/output_{rkv_mode}.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+    else:
+        # Create data dictionary
+        data = {
+            "context_length": context_length,
+            "output_length": output_length,
+            "decoded_output": decoded_output
+        }
+
+        # Create directory if it doesn't exist and save to JSONL file
+        import os
+        output_dir = "/home/yangx/ReasoningPathCompression/observation"
+        os.makedirs(output_dir, exist_ok=True)
+
+        with open(f"{output_dir}/output.jsonl", "w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
     print(f"\nContext Length: {context_length}")

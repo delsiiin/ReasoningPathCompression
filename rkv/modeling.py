@@ -1025,6 +1025,61 @@ def CausalLM_forward(
         layer.self_attn.config.compression = is_newline
     # =============== Step-level Compression logic end =================
 
+    # Calculate information entropy of logits over vocabulary
+    if "entropy" in self.config.mode:
+        import torch.nn.functional as F
+        
+        # Apply softmax to get probabilities
+        probs = F.softmax(logits, dim=-1)
+        
+        # Calculate entropy: H = -sum(p * log(p))
+        # Add small epsilon to avoid log(0)
+        epsilon = 1e-8
+        log_probs = torch.log(probs + epsilon)
+        entropy = -torch.sum(probs * log_probs, dim=-1)
+        
+        import os
+        folder_path = f'/home/yangx/ReasoningPathCompression/observation/token_entropy/llama3_{self.config.method}'
+        os.makedirs(folder_path, exist_ok=True)
+        save_path = f'{folder_path}/entropy.pt'
+
+        # Check if file exists and concatenate or create new
+        if os.path.exists(save_path):
+            existing_entropy = torch.load(save_path)
+            entropy = torch.cat([existing_entropy, entropy], dim=-1)
+
+        torch.save(entropy, save_path)
+
+    if "confidence" in self.config.mode:
+        import torch.nn.functional as F
+        
+        # Get top-k probabilities
+        k = getattr(self.config, 'topk_size', 20)  # Default to top-20 if not specified
+
+        # Apply softmax to get probabilities
+        probs = F.softmax(logits, dim=-1)
+        
+        # Get top-k probabilities
+        topk_probs, _ = torch.topk(probs, k, dim=-1)
+        
+        # Calculate log of top-k probabilities and negative mean
+        epsilon = 1e-8  # Avoid log(0)
+        topk_log_probs = torch.log(topk_probs + epsilon)
+        neg_mean_topk_log_prob = -torch.mean(topk_log_probs, dim=-1)
+        
+        # Save to file
+        import os
+        folder_path = f'/home/yangx/ReasoningPathCompression/observation/token_confidence/llama3_{self.config.method}'
+        os.makedirs(folder_path, exist_ok=True)
+        save_path = f'{folder_path}/confidence.pt'
+
+        # Check if file exists and concatenate or create new
+        if os.path.exists(save_path):
+            existing_data = torch.load(save_path)
+            neg_mean_topk_log_prob = torch.cat([existing_data, neg_mean_topk_log_prob], dim=-1)
+
+        torch.save(neg_mean_topk_log_prob, save_path)
+
     loss = None
     if labels is not None:
         # Upcast to float if we need to compute the loss to avoid potential precision issues

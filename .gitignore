@@ -4,6 +4,7 @@ eval/outputs
 observation/attn_heat_map/
 observation/token_entropy/
 observation/token_confidence/
+observation/*.jsonl
 datasets/
 eval/profile/ca_ratios/
 eval/profile/grad_dir/
