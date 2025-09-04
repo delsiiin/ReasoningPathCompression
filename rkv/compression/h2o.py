@@ -9,6 +9,7 @@ class H2O:
         budget=128,
         window_size=8,
         record_kept_token_indices=False,
+        **kwargs,
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
         self.budget = budget
@@ -33,7 +34,7 @@ class H2O:
             return key_states, value_states
         else:
             query_states = query_states[:, :, -1:, :]
-            attn_weights = compute_attention_scores(query_states, key_states).squeeze(2)
+            attn_weights = compute_attention_scores(query_states, key_states)
 
             attn_weights_sum = (
                 nn.functional.softmax(
