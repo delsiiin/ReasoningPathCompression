@@ -15,6 +15,8 @@ import json
 
 from rkv.monkeypatch import replace_llama, replace_qwen2
 
+from transformers.cache_utils import DynamicCache
+
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-7B"
 # "/home/yangx/QwQ-32B"
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -48,6 +50,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             budget_ans=1024,
             cp_ratio=4.0,
             mode="none", # heatmap, entropy, confidence (if induce answer, set add "_induce_answer")
+            induce_answer: bool = False
             ):
 
     attn_implementation = 'eager'
@@ -185,20 +188,84 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     inputs = tokenizer(prompt, truncation=False, return_tensors="pt").to(model.device)
     context_length = inputs.input_ids.shape[-1]
 
-    with torch.no_grad():
-        outputs = model.generate(input_ids=inputs['input_ids'],
-                                attention_mask=inputs['attention_mask'],
-                                max_new_tokens=max_new_tokens,
-                                pad_token_id=tokenizer.pad_token_id,
-                                use_cache=True,
-                                do_sample=True,
-                                temperature=0.6,
-                                top_p=0.95,
-                                top_k=top_k,
-                                streamer=streamer)
+    if induce_answer:
+        answer_inducer_ids = tokenizer("\n**Final Answer**\n\nThe final answer is \\boxed", add_special_tokens=False)["input_ids"]
 
-    output_length = outputs[0][context_length:].shape[-1]
-    decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
+        stop_ids = [
+                    tokenizer.encode("\n")[-1],
+                    tokenizer.encode(".\n")[-1],
+                    tokenizer.encode(")\n")[-1],
+                    tokenizer.encode("\n\n")[-1],
+                    tokenizer.encode(".\n\n")[-1],
+                    tokenizer.encode(")\n\n")[-1],
+                    tokenizer.eos_token_id
+                ]
+
+        past_key_values = DynamicCache()
+        first_round = True
+        
+        while True:
+            if first_round:
+                generated_dicts = model.generate(
+                    input_ids=inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.6,
+                    top_p=0.95,
+                    top_k=top_k,
+                    eos_token_id=stop_ids,
+                    tokenizer=tokenizer,
+                    past_key_values=past_key_values,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    streamer=streamer
+                )
+                input_ids = generated_dicts.sequences
+                past_key_values = generated_dicts.past_key_values
+                first_round = False
+            else:
+                generated_dicts = model.generate(
+                    input_ids=input_ids,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.6,
+                    top_p=0.95,
+                    top_k=top_k,
+                    tokenizer=tokenizer,
+                    eos_token_id=stop_ids,
+                    past_key_values=past_key_values,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    streamer=streamer
+                )
+                input_ids = generated_dicts.sequences
+                past_key_values = generated_dicts.past_key_values
+            
+            # Check if EOS token is generated
+            if tokenizer.eos_token_id in input_ids[0]:
+                break
+
+        outputs = input_ids
+        output_length = outputs[0][context_length:].shape[-1]
+        decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
+          
+    else:
+
+        with torch.no_grad():
+            outputs = model.generate(input_ids=inputs['input_ids'],
+                                    attention_mask=inputs['attention_mask'],
+                                    max_new_tokens=max_new_tokens,
+                                    pad_token_id=tokenizer.pad_token_id,
+                                    use_cache=True,
+                                    do_sample=True,
+                                    temperature=0.6,
+                                    top_p=0.95,
+                                    top_k=top_k,
+                                    streamer=streamer)
+
+        output_length = outputs[0][context_length:].shape[-1]
+        decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
 
 
     if rkv_mode:
