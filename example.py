@@ -17,6 +17,9 @@ from rkv.monkeypatch import replace_llama, replace_qwen2
 
 from transformers.cache_utils import DynamicCache
 
+from copy import deepcopy
+import torch.nn.functional as F
+
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-7B"
 # "/home/yangx/QwQ-32B"
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -50,7 +53,9 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             budget_ans=1024,
             cp_ratio=4.0,
             mode="none", # heatmap, entropy, confidence (if induce answer, set add "_induce_answer")
-            induce_answer: bool = False
+            generate_rounds: bool = False,
+            observation_length: int = 1024,
+            observation_topk: int = 512,
             ):
 
     attn_implementation = 'eager'
@@ -137,6 +142,16 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
             config.update({'mode':mode})
 
+            if mode == "observation_window":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':32})
+            elif mode == "induce_answer":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':32})
+                config.update({'induce_answer':True})
+
             model = Qwen2ForCausalLM.from_pretrained(
                 model_path,
                 torch_dtype=torch.bfloat16,
@@ -151,6 +166,16 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             config = LlamaConfig.from_pretrained(model_path)
 
             config.update({'mode':mode})
+
+            if mode == "observation_window":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':32})
+            elif mode == "induce_answer":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':32})
+                config.update({'induce_answer':True})
 
             model = LlamaForCausalLM.from_pretrained(
                 model_path,
@@ -188,7 +213,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     inputs = tokenizer(prompt, truncation=False, return_tensors="pt").to(model.device)
     context_length = inputs.input_ids.shape[-1]
 
-    if induce_answer:
+    if generate_rounds:
         answer_inducer_ids = tokenizer("\n**Final Answer**\n\nThe final answer is \\boxed", add_special_tokens=False)["input_ids"]
 
         stop_ids = [
@@ -283,6 +308,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             
         with open(f"{output_dir}/output_{rkv_mode}.jsonl", "w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
+    elif mode == "observation_window" or mode == "induce_answer":
+        pass
     else:
         # Create data dictionary
         data = {

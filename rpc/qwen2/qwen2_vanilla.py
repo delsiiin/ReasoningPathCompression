@@ -50,6 +50,8 @@ from transformers.utils import (
 )
 from .qwen2_config import Qwen2Config
 
+import torch.nn.functional as F
+
 
 if is_flash_attn_2_available():
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
@@ -328,6 +330,12 @@ class Qwen2Attention(nn.Module):
 
         self.rotary_emb = Qwen2RotaryEmbedding(config=self.config)
 
+    def cache_recent(self, current_query_states):
+        if self.cached_recent is None:
+            self.cached_recent = current_query_states
+        else:
+            self.cached_recent = torch.cat([self.cached_recent, current_query_states], dim=-2)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -361,10 +369,57 @@ class Qwen2Attention(nn.Module):
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        if q_len != 1:
+            self.prompt_len = q_len
+            self.cached_recent = None
+
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
+            # Decoding
+            if q_len == 1 and self.config.mode == "observation_window":
+                
+                # cannot use 'past_key_value.get_seq_length'
+                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.prompt_len - self.config.window_size
+                
+                if target_length >= self.config.observation_length - self.config.window_size:
+                    # cache recent query states as selectors
+                    self.cache_recent(query_states)
+
+                if target_length == self.config.observation_length - 1:
+                    
+                    selectors = self.cached_recent
+                    self.cached_recent = None # for next compress
+
+                    # # support gqa
+                    key_states_obs = repeat_kv(key_states, self.num_key_value_groups)
+                    
+                    bsz, num_heads, _, head_dim = selectors.shape
+
+                    attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
+                    # no need to deal with attention mask
+
+                    attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, self.prompt_len:-self.config.window_size], dim=-1, dtype=torch.float32).to(selectors.dtype)
+                    attn_weights_sum = attn_weights_obs.sum(dim = -2)
+
+                    attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
+                   
+                    attn_weights_sum = attn_weights_sum.max(dim=-2).values
+
+                    attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
+
+                    indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+
+                    # Create directory if it doesn't exist
+                    folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/qwen2'
+                    import os
+                    os.makedirs(folder_path, exist_ok=True)
+
+                    # Save indices to file
+                    save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
+                    torch.save(indices, save_path)
+                   
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)

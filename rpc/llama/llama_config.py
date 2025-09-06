@@ -168,6 +168,9 @@ class LlamaConfig(PretrainedConfig):
         head_dim=None,
         mode=None,
         divide_method=None,
+        observation_length=None,
+        observation_topk=None,
+        window_size=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -195,6 +198,9 @@ class LlamaConfig(PretrainedConfig):
         self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
         self.mode = mode
         self.divide_method = divide_method
+        self.observation_length = observation_length
+        self.observation_topk = observation_topk
+        self.window_size = window_size
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, copy it it to 'rope_type'.
         if self.rope_scaling is not None and "type" in self.rope_scaling:
