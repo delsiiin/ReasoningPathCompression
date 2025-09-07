@@ -463,7 +463,7 @@ class LlamaAttention(nn.Module):
                     indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
 
                     # Create directory if it doesn't exist
-                    folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3'
+                    folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3/fullkv'
                     import os 
                     os.makedirs(folder_path, exist_ok=True)
 
@@ -490,10 +490,11 @@ class LlamaAttention(nn.Module):
 
                 attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
 
+                # (bsz, group_size, topk)
                 indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
 
                 # Create directory if it doesn't exist
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices_induced/llama3'
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices_induced/llama3/induced'
                 import os 
                 os.makedirs(folder_path, exist_ok=True)
 
