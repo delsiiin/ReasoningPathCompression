@@ -384,11 +384,11 @@ class Qwen2Attention(nn.Module):
                 # cannot use 'past_key_value.get_seq_length'
                 target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.prompt_len - self.config.window_size
                 
-                if target_length >= self.config.observation_length - self.config.window_size:
+                if target_length > self.config.observation_length - self.config.window_size:
                     # cache recent query states as selectors
                     self.cache_recent(query_states)
 
-                if target_length == self.config.observation_length - 1:
+                if target_length == self.config.observation_length:
                     
                     selectors = self.cached_recent
                     self.cached_recent = None # for next compress
@@ -494,6 +494,37 @@ class Qwen2Attention(nn.Module):
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+        if q_len == 1 and self.config.mode == "observation_window":
+            if target_length > self.config.observation_length:
+                # Get the indices of top-k values in attention weights for the observation
+                obs_length = self.config.observation_length
+                topk = self.config.observation_topk
+
+                # Extract attention weights for the observation window (excluding prompt and recent window)
+                attn_weights_obs = attn_weights[:, :, :, self.prompt_len:]
+
+                attn_weights_sum = attn_weights_obs.view(attn_weights_obs.shape[0], -1, self.num_key_value_groups, attn_weights_obs.shape[-1])
+
+                attn_weights_sum = attn_weights_sum.max(dim=-2).values
+
+                # Get top-k indices for each position
+                topk_indices = torch.topk(attn_weights_sum, k=topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+
+                # Create directory if it doesn't exist
+                import os
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/qwen2/continue_gen'
+                os.makedirs(folder_path, exist_ok=True)
+
+                # Save indices to file
+                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{obs_length}_top_{topk}.pt'
+                
+                # Check if file exists and concatenate or create new
+                if os.path.exists(save_path):
+                    existing_indices = torch.load(save_path)
+                    topk_indices = torch.cat([existing_indices, topk_indices], dim=0)
+                
+                torch.save(topk_indices, save_path)
 
         attn_output = torch.matmul(attn_weights, value_states)
 
