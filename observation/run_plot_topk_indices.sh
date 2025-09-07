@@ -1,6 +1,6 @@
 #!/bin/bash
 # 简易的topk_indices可视化脚本
-# 用法: ./plot_topk.sh [模型] [层] [观察长度] [topk]
+# 用法: ./run_plot_topk_indices.sh [模型] [层] [观察长度] [topk]
 
 # 设置默认值
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,7 +9,7 @@ PYTHON_SCRIPT="$SCRIPT_DIR/plot_topk_indices.py"
 # 帮助信息
 show_help() {
     echo "用法:"
-    echo "  ./plot_topk.sh [模型] [层] [观察长度] [topk]"
+    echo "  ./run_plot_topk_indices.sh [模型] [层] [观察长度] [topk]"
     echo ""
     echo "参数说明:"
     echo "  模型: llama3, qwen2 等"
@@ -18,12 +18,12 @@ show_help() {
     echo "  topk: 选择的位置数量，默认 512"
     echo ""
     echo "示例:"
-    echo "  ./plot_topk.sh llama3 0                    # 处理llama3第0层，默认参数"
-    echo "  ./plot_topk.sh llama3 all                  # 处理llama3所有层，默认参数"
-    echo "  ./plot_topk.sh qwen2 '0 1 15'              # 处理qwen2的0,1,15层"
-    echo "  ./plot_topk.sh llama3 5-10                 # 处理llama3的5到10层"
-    echo "  ./plot_topk.sh llama3 0 2048               # 处理llama3第0层，观察长度2048"
-    echo "  ./plot_topk.sh llama3 0 1024 256           # 处理llama3第0层，观察长度1024，topk=256"
+    echo "  ./run_plot_topk_indices.sh llama3 0                    # 处理llama3第0层，默认参数"
+    echo "  ./run_plot_topk_indices.sh llama3 all                  # 处理llama3所有层，默认参数"
+    echo "  ./run_plot_topk_indices.sh qwen2 '0 1 15'              # 处理qwen2的0,1,15层"
+    echo "  ./run_plot_topk_indices.sh llama3 5-10                 # 处理llama3的5到10层"
+    echo "  ./run_plot_topk_indices.sh llama3 0 2048               # 处理llama3第0层，观察长度2048"
+    echo "  ./run_plot_topk_indices.sh llama3 0 1024 256           # 处理llama3第0层，观察长度1024，topk=256"
     echo ""
     echo "默认值:"
     echo "  模型: llama3"

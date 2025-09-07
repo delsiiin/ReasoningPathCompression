@@ -444,7 +444,7 @@ class Qwen2Attention(nn.Module):
                 indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
 
                 # Create directory if it doesn't exist
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices_induced/qwen2/induced'
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/qwen2/induced'
                 import os 
                 os.makedirs(folder_path, exist_ok=True)
 

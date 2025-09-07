@@ -17,6 +17,27 @@ plt.rcParams['figure.dpi'] = 100
 plt.rcParams['savefig.dpi'] = 300
 plt.rcParams['font.size'] = 10
 
+def get_model_head_count(model_type):
+    """根据模型类型获取head数量"""
+    model_head_config = {
+        'llama3': 8,
+        'llama': 8,
+        'qwen2': 4,
+        'qwen': 4,
+        'mistral': 8,
+        'gemma': 8,
+    }
+    
+    # 模糊匹配模型名称
+    model_lower = model_type.lower()
+    for key in model_head_config:
+        if key in model_lower:
+            return model_head_config[key]
+    
+    # 默认返回8
+    print(f"警告: 未识别的模型类型 {model_type}，使用默认的8个head")
+    return 8
+
 def load_tensor_data(base_dir, model_type, layer_idx, data_type, observation_length=1024, topk=512):
     """
     加载指定层的张量数据
@@ -43,6 +64,9 @@ def load_tensor_data(base_dir, model_type, layer_idx, data_type, observation_len
 def plot_comparison_enhanced(base_dir, model_type, layer_idx, output_dir, observation_length=1024, topk=512):
     """绘制增强版比较图，包含更多统计信息"""
     
+    # 获取模型对应的head数量
+    num_heads = get_model_head_count(model_type)
+    
     # 加载两个目录的数据
     tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'fullkv', observation_length, topk)
     tensor2 = load_tensor_data(base_dir, model_type, layer_idx, 'induced', observation_length, topk)
@@ -51,28 +75,40 @@ def plot_comparison_enhanced(base_dir, model_type, layer_idx, output_dir, observ
         print(f"Cannot load data for layer {layer_idx}")
         return
     
-    # 确保张量形状正确 - 动态检查topk大小
-    expected_shape = (1, 8, topk)
+    # 确保张量形状正确 - 动态检查topk大小和head数量
+    expected_shape = (1, num_heads, topk)
     assert tensor1.shape == expected_shape, f"Tensor1 shape incorrect: {tensor1.shape}, expected: {expected_shape}"
     assert tensor2.shape == expected_shape, f"Tensor2 shape incorrect: {tensor2.shape}, expected: {expected_shape}"
     
-    # 创建8个子图
-    fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-    fig.suptitle(f'{model_type.upper()} Layer {layer_idx} - TopK Indices Comparison\n' + 
+    # 根据head数量动态创建子图布局
+    if num_heads == 4:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    elif num_heads == 8:
+        fig, axes = plt.subplots(2, 4, figsize=(24, 12))
+    else:
+        # 对于其他数量，使用合适的布局
+        rows = int(np.ceil(num_heads / 4))
+        cols = min(num_heads, 4)
+        fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 6*rows))
+    
+    fig.suptitle(f'{model_type.upper()} Layer {layer_idx} - TopK Indices Comparison ({num_heads} heads)\n' + 
                  'Blue: topk_indices | Red: topk_indices_induced | Green: Overlap', 
                  fontsize=16, y=0.98)
     
     # 展平axes数组便于索引
-    axes = axes.flatten()
+    if num_heads == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten() if hasattr(axes, 'flatten') else axes
     
     # 统计信息
     overlap_stats = []
     
     # 为每个子图（对应张量的第二个维度）绘制散点图
-    for head_idx in range(8):
+    for head_idx in range(num_heads):
         ax = axes[head_idx]
         
-        # 提取数据 (1, 8, 512) -> (512,)
+        # 提取数据 (1, num_heads, topk) -> (topk,)
         data1 = tensor1[0, head_idx, :].numpy()
         data2 = tensor2[0, head_idx, :].numpy()
         
@@ -109,6 +145,11 @@ def plot_comparison_enhanced(base_dir, model_type, layer_idx, output_dir, observ
         if head_idx == 0:
             ax.legend(fontsize=8)
     
+    # 隐藏多余的子图（如果有的话）
+    if hasattr(axes, '__len__') and len(axes) > num_heads:
+        for i in range(num_heads, len(axes)):
+            axes[i].set_visible(False)
+    
     plt.tight_layout()
     
     # 在图的底部添加统计信息
@@ -127,6 +168,9 @@ def plot_comparison_enhanced(base_dir, model_type, layer_idx, output_dir, observ
 def plot_distribution_comparison(base_dir, model_type, layer_idx, output_dir, observation_length=1024, topk=512):
     """绘制位置分布比较图"""
     
+    # 获取模型对应的head数量
+    num_heads = get_model_head_count(model_type)
+    
     # 加载数据
     tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'fullkv', observation_length, topk)
     tensor2 = load_tensor_data(base_dir, model_type, layer_idx, 'induced', observation_length, topk)
@@ -134,12 +178,25 @@ def plot_distribution_comparison(base_dir, model_type, layer_idx, output_dir, ob
     if tensor1 is None or tensor2 is None:
         return
     
-    fig, axes = plt.subplots(2, 4, figsize=(24, 12))
-    fig.suptitle(f'{model_type.upper()} Layer {layer_idx} - Position Distribution Histograms', fontsize=16)
+    # 根据head数量动态创建子图布局
+    if num_heads == 4:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    elif num_heads == 8:
+        fig, axes = plt.subplots(2, 4, figsize=(24, 12))
+    else:
+        rows = int(np.ceil(num_heads / 4))
+        cols = min(num_heads, 4)
+        fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 6*rows))
     
-    axes = axes.flatten()
+    fig.suptitle(f'{model_type.upper()} Layer {layer_idx} - Position Distribution Histograms ({num_heads} heads)', fontsize=16)
     
-    for head_idx in range(8):
+    # 展平axes数组便于索引
+    if num_heads == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten() if hasattr(axes, 'flatten') else axes
+    
+    for head_idx in range(num_heads):
         ax = axes[head_idx]
         
         data1 = tensor1[0, head_idx, :].numpy()
@@ -155,6 +212,11 @@ def plot_distribution_comparison(base_dir, model_type, layer_idx, output_dir, ob
         ax.legend()
         ax.grid(True, alpha=0.3)
     
+    # 隐藏多余的子图
+    if hasattr(axes, '__len__') and len(axes) > num_heads:
+        for i in range(num_heads, len(axes)):
+            axes[i].set_visible(False)
+    
     plt.tight_layout()
     
     save_path = os.path.join(output_dir, f"topk_distribution_{model_type}_layer_{layer_idx}.png")
@@ -165,6 +227,9 @@ def plot_distribution_comparison(base_dir, model_type, layer_idx, output_dir, ob
 def analyze_layer_statistics(base_dir, model_type, layer_idx, observation_length=1024, topk=512):
     """分析单层的统计信息"""
     
+    # 获取模型对应的head数量
+    num_heads = get_model_head_count(model_type)
+    
     # 加载数据
     tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'fullkv', observation_length, topk)
     tensor2 = load_tensor_data(base_dir, model_type, layer_idx, 'induced', observation_length, topk)
@@ -172,9 +237,9 @@ def analyze_layer_statistics(base_dir, model_type, layer_idx, observation_length
     if tensor1 is None or tensor2 is None:
         return
     
-    print(f"\n=== {model_type.upper()} Layer {layer_idx} Statistics ===")
+    print(f"\n=== {model_type.upper()} Layer {layer_idx} Statistics ({num_heads} heads) ===")
     
-    for head_idx in range(8):
+    for head_idx in range(num_heads):
         data1 = tensor1[0, head_idx, :].numpy()
         data2 = tensor2[0, head_idx, :].numpy()
         

@@ -5,7 +5,6 @@ observation/attn_heat_map/
 observation/token_entropy/
 observation/token_confidence/
 observation/topk_indices/
-observation/topk_indices_induced/
 observation/*.jsonl
 datasets/
 eval/profile/ca_ratios/
