@@ -214,8 +214,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     context_length = inputs.input_ids.shape[-1]
 
     if generate_rounds:
-        answer_inducer_ids = tokenizer("\n**Final Answer**\n\nThe final answer is \\boxed", add_special_tokens=False)["input_ids"]
-
+        
         stop_ids = [
                     tokenizer.encode("\n")[-1],
                     tokenizer.encode(".\n")[-1],
@@ -275,6 +274,35 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         output_length = outputs[0][context_length:].shape[-1]
         decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
           
+    elif mode == "induce_answer":
+
+        answer_inducer_ids = tokenizer("\n**Final Answer**\n\nThe final answer is \\boxed", add_special_tokens=False)["input_ids"]
+        # print(len(answer_inducer_ids), answer_inducer_ids) 11
+        past_key_values = DynamicCache()
+        
+        generated_dicts = model.generate(
+            input_ids=inputs['input_ids'],
+            attention_mask=inputs['attention_mask'],
+            max_new_tokens=observation_length,
+            do_sample=True,
+            temperature=0.6,
+            top_p=0.95,
+            top_k=top_k,
+            tokenizer=tokenizer,
+            past_key_values=past_key_values,
+            return_dict_in_generate=True,
+            output_scores=True,
+            streamer=streamer
+        )
+        
+        input_ids = generated_dicts.sequences
+        past_key_values = generated_dicts.past_key_values
+        # Concatenate the last token from input_ids with answer_inducer_ids
+        last_token = input_ids[:, -1:]  # Get the last token from input_ids
+        answer_inducer_ids = torch.tensor([answer_inducer_ids], device=input_ids.device)
+        answer_inducer_ids = torch.cat([last_token, answer_inducer_ids], dim=1)
+        output_dicts = model(input_ids=answer_inducer_ids, past_key_values=past_key_values, prompt_len=context_length)
+
     else:
 
         with torch.no_grad():
@@ -308,6 +336,10 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             
         with open(f"{output_dir}/output_{rkv_mode}.jsonl", "w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+        print(f"\nContext Length: {context_length}")
+        print(f"Output Length: {output_length}\n")
+
     elif mode == "observation_window" or mode == "induce_answer":
         pass
     else:
@@ -326,8 +358,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         with open(f"{output_dir}/output.jsonl", "w", encoding="utf-8") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
-    print(f"\nContext Length: {context_length}")
-    print(f"Output Length: {output_length}\n")
+        print(f"\nContext Length: {context_length}")
+        print(f"Output Length: {output_length}\n")
 
 
 if __name__ == '__main__':

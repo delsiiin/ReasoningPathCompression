@@ -346,6 +346,7 @@ class Qwen2Attention(nn.Module):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -369,7 +370,7 @@ class Qwen2Attention(nn.Module):
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if q_len != 1:
+        if q_len != 1 and self.config.mode != "induce_answer":
             self.prompt_len = q_len
             self.cached_recent = None
 
@@ -425,6 +426,33 @@ class Qwen2Attention(nn.Module):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        if self.config.mode == "induce_answer":
+
+            if "prompt_len" in kwargs.keys() and kwargs["prompt_len"] is not None:
+                prompt_len = kwargs["prompt_len"]
+                
+                attn_weights_obs = nn.functional.softmax(attn_weights[:, :, :, prompt_len:-11], dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights_sum = attn_weights_obs.sum(dim = -2)
+
+                attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
+                
+                attn_weights_sum = attn_weights_sum.max(dim=-2).values
+
+                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
+
+                indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+
+                # Create directory if it doesn't exist
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices_induced/llama3'
+                import os 
+                os.makedirs(folder_path, exist_ok=True)
+
+                # Save indices to file
+                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
+                torch.save(indices, save_path)
+
+
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
@@ -798,6 +826,7 @@ class Qwen2DecoderLayer(nn.Module):
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
+            **kwargs
         )
         hidden_states = residual + hidden_states
 
@@ -986,6 +1015,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1072,6 +1102,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    prompt_len=kwargs['prompt_len'] if 'prompt_len' in kwargs.keys() else None,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1215,6 +1246,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
+        **kwargs
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1265,6 +1297,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            prompt_len=kwargs['prompt_len'] if 'prompt_len' in kwargs.keys() else None,
         )
 
         hidden_states = outputs[0]
