@@ -33,6 +33,6 @@ CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode confidence --rkv_budget 1024
 
 ## Compare Important Indices w/ or w/o Answer Inducing
-CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 1500  --mode observation_window --observation_length 1024 --observation_topk 512
+CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 1500  --mode observation_window --observation_length 1024 --observation_topk 512 --window_size 8
 CUDA_VISIBLE_DEVICES=0 python example.py --mode induce_answer --observation_length 1024 --observation_topk 512 
 ./run_plot_topk_indices.sh llama3 all 1024 512

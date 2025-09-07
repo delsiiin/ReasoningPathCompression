@@ -56,6 +56,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             generate_rounds: bool = False,
             observation_length: int = 1024,
             observation_topk: int = 512,
+            window_size: int = 32,
             ):
 
     attn_implementation = 'eager'
@@ -145,11 +146,11 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             if mode == "observation_window":
                 config.update({'observation_length':observation_length})
                 config.update({'observation_topk':observation_topk})
-                config.update({'window_size':32})
+                config.update({'window_size':window_size})
             elif mode == "induce_answer":
                 config.update({'observation_length':observation_length})
                 config.update({'observation_topk':observation_topk})
-                config.update({'window_size':32})
+                config.update({'window_size':window_size})
                 config.update({'induce_answer':True})
 
             model = Qwen2ForCausalLM.from_pretrained(
@@ -170,11 +171,11 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             if mode == "observation_window":
                 config.update({'observation_length':observation_length})
                 config.update({'observation_topk':observation_topk})
-                config.update({'window_size':32})
+                config.update({'window_size':window_size})
             elif mode == "induce_answer":
                 config.update({'observation_length':observation_length})
                 config.update({'observation_topk':observation_topk})
-                config.update({'window_size':32})
+                config.update({'window_size':window_size})
                 config.update({'induce_answer':True})
 
             model = LlamaForCausalLM.from_pretrained(
