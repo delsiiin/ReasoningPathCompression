@@ -159,7 +159,7 @@ def plot_comparison_enhanced(base_dir, model_type, layer_idx, output_dir, observ
     
     # 保存图片
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"topk_comparison_enhanced_{model_type}_layer_{layer_idx}.png")
+    save_path = os.path.join(output_dir, f"topk_comparison_{model_type}_layer_{layer_idx}_obs{observation_length}_top{topk}.pdf")
     
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Enhanced comparison saved to: {save_path}")
@@ -219,7 +219,7 @@ def plot_distribution_comparison(base_dir, model_type, layer_idx, output_dir, ob
     
     plt.tight_layout()
     
-    save_path = os.path.join(output_dir, f"topk_distribution_{model_type}_layer_{layer_idx}.png")
+    save_path = os.path.join(output_dir, f"topk_distribution_{model_type}_layer_{layer_idx}_obs{observation_length}_top{topk}.pdf")
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Distribution comparison saved to: {save_path}")
     plt.close()
