@@ -38,6 +38,194 @@ def get_model_head_count(model_type):
     print(f"警告: 未识别的模型类型 {model_type}，使用默认的8个head")
     return 8
 
+def calculate_hit_rate(continue_gen_tensor, reference_tensor):
+    """
+    计算hit rate (overlap ratio)
+    
+    Args:
+        continue_gen_tensor: 形状为 (num_step, num_head, topk) 的张量
+        reference_tensor: 形状为 (1, num_head, topk) 的参考张量
+    
+    Returns:
+        hit_rates: 每个head的平均hit rate，形状为 (num_head,)
+    """
+    num_steps, num_heads, topk = continue_gen_tensor.shape
+    _, num_heads_ref, topk_ref = reference_tensor.shape
+    
+    # 确保维度匹配
+    assert num_heads == num_heads_ref, f"Head数量不匹配: {num_heads} vs {num_heads_ref}"
+    assert topk == topk_ref, f"TopK数量不匹配: {topk} vs {topk_ref}"
+    
+    hit_rates = []
+    
+    # 对每个head计算hit rate
+    for head_idx in range(num_heads):
+        reference_indices = set(reference_tensor[0, head_idx, :].tolist())
+        step_hit_rates = []
+        
+        # 对每个step计算hit rate
+        for step_idx in range(num_steps):
+            continue_gen_indices = set(continue_gen_tensor[step_idx, head_idx, :].tolist())
+            
+            # 计算overlap
+            overlap = len(reference_indices.intersection(continue_gen_indices))
+            hit_rate = overlap / len(reference_indices)  # 以参考张量为基准计算hit rate
+            step_hit_rates.append(hit_rate)
+        
+        # 对num_step维度求平均
+        avg_hit_rate = np.mean(step_hit_rates)
+        hit_rates.append(avg_hit_rate)
+    
+    return np.array(hit_rates)
+
+def plot_hit_rate_comparison(base_dir, model_type, layer_idx, output_dir, observation_length=1024, topk=256, reference_data_type='snapkv'):
+    """
+    绘制hit rate比较的点线图
+    
+    Args:
+        base_dir: 基础目录路径
+        model_type: 模型类型 (如 'llama3', 'qwen2') 
+        layer_idx: 层索引
+        output_dir: 输出目录
+        observation_length: 观察长度
+        topk: topk值
+        reference_data_type: 参考数据类型 (默认: 'snapkv'，也可以是 'induced' 等)
+    """
+    # 获取模型对应的head数量
+    num_heads = get_model_head_count(model_type)
+    
+    # 加载continue_gen数据
+    continue_gen_tensor = load_tensor_data(base_dir, model_type, layer_idx, 'continue_gen', observation_length, topk)
+    # 加载参考数据
+    reference_tensor = load_tensor_data(base_dir, model_type, layer_idx, reference_data_type, observation_length, topk)
+    
+    if continue_gen_tensor is None or reference_tensor is None:
+        print(f"Cannot load data for layer {layer_idx}")
+        return
+    
+    print(f"Layer {layer_idx} - continue_gen shape: {continue_gen_tensor.shape}, {reference_data_type} shape: {reference_tensor.shape}")
+    
+    # 计算hit rate
+    hit_rates = calculate_hit_rate(continue_gen_tensor, reference_tensor)
+    
+    # 创建图形
+    plt.figure(figsize=(12, 8))
+    
+    # 绘制点线图
+    head_ids = np.arange(num_heads)
+    plt.plot(head_ids, hit_rates, 'o-', linewidth=2, markersize=8, label=f'Layer {layer_idx}')
+    
+    # 设置图形属性
+    plt.xlabel('Head ID', fontsize=14)
+    plt.ylabel('Hit Rate', fontsize=14) 
+    plt.title(f'{model_type.upper()} Layer {layer_idx} - Hit Rate by Head\n'
+              f'(Continue Gen vs {reference_data_type.upper()}, TopK={topk})', fontsize=16)
+    
+    # 设置x轴刻度
+    plt.xticks(head_ids)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=12)
+    
+    # 添加数值标签
+    for i, rate in enumerate(hit_rates):
+        plt.text(i, rate + 0.01, f'{rate:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    # 设置y轴范围，留一些边距
+    y_min = max(0, min(hit_rates) - 0.05)
+    y_max = min(1, max(hit_rates) + 0.1)
+    plt.ylim(y_min, y_max)
+    
+    plt.tight_layout()
+    
+    # 保存图片
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"hit_rate_{model_type}_layer_{layer_idx}_vs_{reference_data_type}_obs{observation_length}_top{topk}.pdf")
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Hit rate plot saved to: {save_path}")
+    
+    # 打印统计信息
+    print(f"Layer {layer_idx} Hit Rate Statistics (vs {reference_data_type}):")
+    print(f"  Average: {np.mean(hit_rates):.3f}")
+    print(f"  Min: {np.min(hit_rates):.3f} (Head {np.argmin(hit_rates)})")
+    print(f"  Max: {np.max(hit_rates):.3f} (Head {np.argmax(hit_rates)})")
+    print(f"  Std: {np.std(hit_rates):.3f}")
+    
+    plt.close()
+    
+    return hit_rates
+
+def plot_multi_layer_hit_rate_comparison(all_hit_rates, model_type, output_dir, observation_length=1024, topk=256, reference_data_type='snapkv'):
+    """
+    绘制多层hit rate比较图
+    
+    Args:
+        all_hit_rates: 字典，key为layer_idx，value为对应的hit_rates数组
+        model_type: 模型类型
+        output_dir: 输出目录
+        observation_length: 观察长度
+        topk: topk值
+        reference_data_type: 参考数据类型
+    """
+    if not all_hit_rates:
+        return
+    
+    # 获取head数量
+    num_heads = get_model_head_count(model_type)
+    
+    # 创建图形
+    plt.figure(figsize=(14, 10))
+    
+    # 为每一层绘制线条
+    colors = plt.cm.tab10(np.linspace(0, 1, len(all_hit_rates)))
+    head_ids = np.arange(num_heads)
+    
+    for i, (layer_idx, hit_rates) in enumerate(sorted(all_hit_rates.items())):
+        plt.plot(head_ids, hit_rates, 'o-', linewidth=2, markersize=6, 
+                color=colors[i], label=f'Layer {layer_idx}', alpha=0.8)
+    
+    # 计算平均值
+    all_rates = np.array(list(all_hit_rates.values()))
+    avg_rates = np.mean(all_rates, axis=0)
+    plt.plot(head_ids, avg_rates, 'k-', linewidth=3, markersize=8, 
+            marker='s', label='Average', alpha=0.9)
+    
+    # 设置图形属性
+    plt.xlabel('Head ID', fontsize=14)
+    plt.ylabel('Hit Rate', fontsize=14)
+    plt.title(f'{model_type.upper()} - Hit Rate Comparison Across Layers\n'
+              f'(Continue Gen vs {reference_data_type.upper()}, TopK={topk})', fontsize=16)
+    
+    # 设置x轴刻度
+    plt.xticks(head_ids)
+    plt.grid(True, alpha=0.3)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+    
+    # 设置y轴范围
+    y_min = max(0, np.min(all_rates) - 0.05)
+    y_max = min(1, np.max(all_rates) + 0.1)
+    plt.ylim(y_min, y_max)
+    
+    plt.tight_layout()
+    
+    # 保存图片
+    save_path = os.path.join(output_dir, f"hit_rate_multi_layer_{model_type}_vs_{reference_data_type}_obs{observation_length}_top{topk}.pdf")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Multi-layer hit rate plot saved to: {save_path}")
+    
+    # 打印综合统计信息
+    print(f"\n=== Multi-layer Hit Rate Statistics (vs {reference_data_type}) ===")
+    print(f"Average across all layers and heads: {np.mean(all_rates):.3f}")
+    print(f"Overall standard deviation: {np.std(all_rates):.3f}")
+    
+    # 每个head的统计
+    for head_idx in range(num_heads):
+        head_rates = all_rates[:, head_idx]
+        print(f"Head {head_idx}: avg={np.mean(head_rates):.3f}, std={np.std(head_rates):.3f}, "
+              f"min={np.min(head_rates):.3f}, max={np.max(head_rates):.3f}")
+    
+    plt.close()
+
 def load_tensor_data(base_dir, model_type, layer_idx, data_type, observation_length=1024, topk=512):
     """
     加载指定层的张量数据
@@ -46,7 +234,7 @@ def load_tensor_data(base_dir, model_type, layer_idx, data_type, observation_len
         base_dir: 基础目录路径
         model_type: 模型类型 (如 'llama3', 'qwen2')
         layer_idx: 层索引
-        data_type: 数据类型 ('fullkv' 或 'induced')
+        data_type: 数据类型 ('snapkv' 或 'induced')
         observation_length: 观察长度 (默认: 1024)
         topk: topk值 (默认: 512)
     """
@@ -68,7 +256,7 @@ def plot_comparison_enhanced(base_dir, model_type, layer_idx, output_dir, observ
     num_heads = get_model_head_count(model_type)
     
     # 加载两个目录的数据
-    tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'fullkv', observation_length, topk)
+    tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'snapkv', observation_length, topk)
     tensor2 = load_tensor_data(base_dir, model_type, layer_idx, 'induced', observation_length, topk)
     
     if tensor1 is None or tensor2 is None:
@@ -172,7 +360,7 @@ def plot_distribution_comparison(base_dir, model_type, layer_idx, output_dir, ob
     num_heads = get_model_head_count(model_type)
     
     # 加载数据
-    tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'fullkv', observation_length, topk)
+    tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'snapkv', observation_length, topk)
     tensor2 = load_tensor_data(base_dir, model_type, layer_idx, 'induced', observation_length, topk)
     
     if tensor1 is None or tensor2 is None:
@@ -231,7 +419,7 @@ def analyze_layer_statistics(base_dir, model_type, layer_idx, observation_length
     num_heads = get_model_head_count(model_type)
     
     # 加载数据
-    tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'fullkv', observation_length, topk)
+    tensor1 = load_tensor_data(base_dir, model_type, layer_idx, 'snapkv', observation_length, topk)
     tensor2 = load_tensor_data(base_dir, model_type, layer_idx, 'induced', observation_length, topk)
     
     if tensor1 is None or tensor2 is None:
@@ -299,6 +487,15 @@ def parse_arguments():
     parser.add_argument('--skip-statistics', action='store_true',
                         help='跳过统计信息的打印')
     
+    parser.add_argument('--hit-rate-only', action='store_true',
+                        help='只计算和绘制hit rate，跳过其他图表')
+    
+    parser.add_argument('--skip-hit-rate', action='store_true',
+                        help='跳过hit rate的计算和绘制')
+    
+    parser.add_argument('--reference-data-type', type=str, default='snapkv',
+                        help='用于计算hit rate的参考数据类型 (默认: snapkv, 也可以是 induced 等)')
+    
     return parser.parse_args()
 
 def parse_layer_specification(layer_specs):
@@ -318,12 +515,12 @@ def parse_layer_specification(layer_specs):
 
 def get_available_layers(base_dir, model_type, observation_length=1024, topk=512):
     """获取指定模型的所有可用层"""
-    fullkv_dir = os.path.join(base_dir, model_type, 'fullkv')
-    if not os.path.exists(fullkv_dir):
+    snapkv_dir = os.path.join(base_dir, model_type, 'snapkv')
+    if not os.path.exists(snapkv_dir):
         return []
     
     # 查找所有匹配的文件
-    pattern = os.path.join(fullkv_dir, f"topk_indices_layer_*_observe_{observation_length}_top_{topk}.pt")
+    pattern = os.path.join(snapkv_dir, f"topk_indices_layer_*_observe_{observation_length}_top_{topk}.pt")
     files = glob(pattern)
     
     # 提取层号
@@ -374,34 +571,58 @@ if __name__ == "__main__":
     print(f"开始处理模型: {args.model}")
     print(f"观察长度: {args.observation_length}")
     print(f"TopK值: {args.topk}")
+    print(f"参考数据类型: {args.reference_data_type}")
     print(f"要处理的层: {layers_to_plot}")
     print(f"输出目录: {output_dir}")
     
     # 处理每一层
     success_count = 0
+    all_hit_rates = {}  # 存储所有层的hit rate结果
+    
     for layer_idx in layers_to_plot:
         print(f"\n处理第 {layer_idx} 层...")
         
         try:
-            # 生成增强版比较图
-            plot_comparison_enhanced(args.base_dir, args.model, layer_idx, output_dir, 
-                                   args.observation_length, args.topk)
-            
-            # 生成分布比较图
-            if not args.skip_distribution:
-                plot_distribution_comparison(args.base_dir, args.model, layer_idx, output_dir,
-                                           args.observation_length, args.topk)
-            
-            # 打印统计信息
-            if not args.skip_statistics:
-                analyze_layer_statistics(args.base_dir, args.model, layer_idx,
-                                        args.observation_length, args.topk)
+            # 如果只计算hit rate
+            if args.hit_rate_only:
+                hit_rates = plot_hit_rate_comparison(args.base_dir, args.model, layer_idx, output_dir, 
+                                                   args.observation_length, args.topk, args.reference_data_type)
+                if hit_rates is not None:
+                    all_hit_rates[layer_idx] = hit_rates
+            else:
+                # 计算hit rate（如果没有跳过）
+                if not args.skip_hit_rate:
+                    hit_rates = plot_hit_rate_comparison(args.base_dir, args.model, layer_idx, output_dir, 
+                                                       args.observation_length, args.topk, args.reference_data_type)
+                    if hit_rates is not None:
+                        all_hit_rates[layer_idx] = hit_rates
+                
+                # 生成增强版比较图
+                plot_comparison_enhanced(args.base_dir, args.model, layer_idx, output_dir, 
+                                       args.observation_length, args.topk)
+                
+                # 生成分布比较图
+                if not args.skip_distribution:
+                    plot_distribution_comparison(args.base_dir, args.model, layer_idx, output_dir,
+                                               args.observation_length, args.topk)
+                
+                # 打印统计信息
+                if not args.skip_statistics:
+                    analyze_layer_statistics(args.base_dir, args.model, layer_idx,
+                                            args.observation_length, args.topk)
             
             success_count += 1
             
         except Exception as e:
             print(f"处理第 {layer_idx} 层时出错: {e}")
+            import traceback
+            traceback.print_exc()
             continue
+    
+    # 如果处理了多个层，绘制综合的hit rate比较图
+    if len(all_hit_rates) > 1:
+        plot_multi_layer_hit_rate_comparison(all_hit_rates, args.model, output_dir, 
+                                           args.observation_length, args.topk, args.reference_data_type)
     
     print(f"\n完成! 成功处理了 {success_count}/{len(layers_to_plot)} 个层")
     print(f"所有图片已保存到: {output_dir}")
