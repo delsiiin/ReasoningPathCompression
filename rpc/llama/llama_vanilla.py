@@ -418,7 +418,7 @@ class LlamaAttention(nn.Module):
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        if q_len != 1 and self.config.mode != "induce_answer":
+        if q_len != 1:
             self.prompt_len = q_len
             self.cached_recent = None
 
@@ -429,16 +429,16 @@ class LlamaAttention(nn.Module):
 
 
             # Decoding
-            if q_len == 1 and self.config.mode == "observation_window":
+            if (q_len == 1) or (q_len != 1 and self.config.mode == "induce_answer"):
                 
                 # cannot use 'past_key_value.get_seq_length'
-                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.prompt_len - self.config.window_size
+                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.prompt_len
                 
                 if target_length > self.config.observation_length - self.config.window_size:
                     # cache recent query states as selectors
                     self.cache_recent(query_states)
 
-                if target_length == self.config.observation_length:
+                if target_length == self.config.observation_length and self.config.mode == "observation_window":
                     
                     selectors = self.cached_recent
                     self.cached_recent = None # for next compress
@@ -470,37 +470,47 @@ class LlamaAttention(nn.Module):
                     # Save indices to file
                     save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
                     torch.save(indices, save_path)
+
+                if self.config.mode == "induce_answer":
+
+                    if "prompt_len" in kwargs.keys() and kwargs["prompt_len"] is not None:
+                        prompt_len = kwargs["prompt_len"]
+
+                        # selectors = self.cached_recent
+                        # self.cached_recent = None # for next compress   
+                        # selectors = torch.cat([selectors, query_states], dim=-2)
+                        selectors = query_states
+                        # # support gqa
+                        key_states_obs = repeat_kv(key_states, self.num_key_value_groups)
+                        
+                        bsz, num_heads, _, head_dim = selectors.shape
+
+                        attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
+                        # [CAUTIOUS ABOUT KEY LENGTH]
+                        attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, prompt_len:-query_states.shape[-2]-self.config.window_size], dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        attn_weights_sum = attn_weights_obs.sum(dim = -2)
+
+                        attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
+                        
+                        attn_weights_sum = attn_weights_sum.max(dim=-2).values
+
+                        attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
+
+                        indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+                        
+                        # Create directory if it doesn't exist
+                        folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3/induced'
+                        import os 
+                        os.makedirs(folder_path, exist_ok=True)
+
+                        # Save indices to file
+                        save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
+                        torch.save(indices, save_path)
                    
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if self.config.mode == "induce_answer":
-
-            if "prompt_len" in kwargs.keys() and kwargs["prompt_len"] is not None:
-                prompt_len = kwargs["prompt_len"]
-                
-                attn_weights_obs = nn.functional.softmax(attn_weights[:, :, :, prompt_len:-11], dim=-1, dtype=torch.float32).to(query_states.dtype)
-                attn_weights_sum = attn_weights_obs.sum(dim = -2)
-
-                attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
-                
-                attn_weights_sum = attn_weights_sum.max(dim=-2).values
-
-                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
-
-                # (bsz, group_size, topk)
-                indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
-
-                # Create directory if it doesn't exist
-                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3/induced'
-                import os 
-                os.makedirs(folder_path, exist_ok=True)
-
-                # Save indices to file
-                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
-                torch.save(indices, save_path)
 
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
