@@ -3,10 +3,10 @@ import warnings
 import transformers
 
 # from transformers.models.llama.modeling_llama import LLAMA_ATTENTION_CLASSES
-from rpc.llama.llama_vanilla import LLAMA_ATTENTION_CLASSES
-from rpc.qwen2.qwen2_vanilla import QWEN2_ATTENTION_CLASSES
-from rpc.qwen2.qwen2_vanilla import Qwen2Model, Qwen2ForCausalLM
-from rpc.llama.llama_vanilla import LlamaModel, LlamaForCausalLM
+from transformers.models.llama.modeling_llama import LLAMA_ATTENTION_CLASSES
+from transformers.models.qwen2.modeling_qwen2 import QWEN2_ATTENTION_CLASSES
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Model, Qwen2ForCausalLM
+from transformers.models.llama.modeling_llama import LlamaModel, LlamaForCausalLM
 
 
 def check_version():

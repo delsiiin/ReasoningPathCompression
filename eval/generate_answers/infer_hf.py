@@ -22,9 +22,9 @@ from datasets import load_dataset
 from eval.generate_answers.utils_hf import format_gpqa_question
 
 from rpc.llama.llama_config import LlamaConfig
-from rpc.llama.llama_vanilla import LlamaForCausalLM
+from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from rpc.qwen2.qwen2_config import Qwen2Config
-from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
+from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 
 from rkv.monkeypatch import replace_llama, replace_qwen2
 
