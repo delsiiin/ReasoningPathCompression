@@ -95,7 +95,7 @@ def LlamaAttention_init(
     # =============== New logic start ===============
     self.config.update(compression_config)
     self.kv_cluster = KV_COMPRESSION_MAP[compression_config["method"]](
-        **compression_config["method_config"]
+        layer_idx=self.layer_idx, model_config=self.config, model_type="llama3", **compression_config["method_config"] 
     )
     # =============== New logic end =================
 
@@ -469,7 +469,7 @@ def Qwen2Attention_init(
     # =============== New logic start ===============
     self.config.update(compression_config)
     self.kv_cluster = KV_COMPRESSION_MAP[compression_config["method"]](
-        **compression_config["method_config"]
+        layer_idx=self.layer_idx, model_config=self.config, model_type="qwen2", **compression_config["method_config"] 
     )
     # =============== New logic end =================
 

@@ -438,38 +438,38 @@ class LlamaAttention(nn.Module):
                     # cache recent query states as selectors
                     self.cache_recent(query_states)
 
-                if target_length == self.config.observation_length and self.config.mode == "observation_window":
+                # if target_length == self.config.observation_length and self.config.mode == "observation_window":
                     
-                    selectors = self.cached_recent
-                    self.cached_recent = None # for next compress
+                #     selectors = self.cached_recent
+                #     self.cached_recent = None # for next compress
 
-                    # # support gqa
-                    key_states_obs = repeat_kv(key_states, self.num_key_value_groups)
+                #     # # support gqa
+                #     key_states_obs = repeat_kv(key_states, self.num_key_value_groups)
                     
-                    bsz, num_heads, _, head_dim = selectors.shape
+                #     bsz, num_heads, _, head_dim = selectors.shape
 
-                    attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
-                    # no need to deal with attention mask
+                #     attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
+                #     # no need to deal with attention mask
 
-                    attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, self.prompt_len:-self.config.window_size], dim=-1, dtype=torch.float32).to(selectors.dtype)
-                    attn_weights_sum = attn_weights_obs.sum(dim = -2)
+                #     attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, self.prompt_len:-self.config.window_size], dim=-1, dtype=torch.float32).to(selectors.dtype)
+                #     attn_weights_sum = attn_weights_obs.sum(dim = -2)
 
-                    attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
+                #     attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
                    
-                    attn_weights_sum = attn_weights_sum.max(dim=-2).values
+                #     attn_weights_sum = attn_weights_sum.max(dim=-2).values
 
-                    attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
+                #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
 
-                    indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+                #     indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
 
-                    # Create directory if it doesn't exist
-                    folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3/snapkv'
-                    import os 
-                    os.makedirs(folder_path, exist_ok=True)
+                #     # Create directory if it doesn't exist
+                #     folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3/snapkv'
+                #     import os 
+                #     os.makedirs(folder_path, exist_ok=True)
 
-                    # Save indices to file
-                    save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
-                    torch.save(indices, save_path)
+                #     # Save indices to file
+                #     save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
+                #     torch.save(indices, save_path)
 
                 if self.config.mode == "induce_answer":
 
@@ -554,7 +554,7 @@ class LlamaAttention(nn.Module):
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
 
-        if q_len == 1 and self.config.mode == "observation_window":
+        if q_len == 1 and self.config.mode == "record_indices":
             if target_length > self.config.observation_length:
                 # Get the indices of top-k values in attention weights for the observation
                 obs_length = self.config.observation_length

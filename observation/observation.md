@@ -28,17 +28,21 @@ python draw_heat_map.py --model llama --num_layers 32
 
 ## Generate Token Entropy Using Entropy Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode entropy --rkv_budget 1024
+./run_plot_token_entropy.sh llama h2o
 
 ## Generate Token Confidence Using Entropy Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode confidence --rkv_budget 1024
+./run_plot_token_confidence.sh llama h2o
 
 ## Compare Important Indices w/ Different Compressed Methods
-### SnapKV
-CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 1152  --mode observation_window --observation_length 1024 --observation_topk 512 --window_size 8
+### Vanilla Continue Gen (eg. 1024 -> 1152)
+CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 1152  --mode record_indices --observation_length 1024 --observation_topk 256
+### Compression Methods
+CUDA_VISIBLE_DEVICES=0 python example.py --rkv True --rkv_mode snapkv --mode record_indices --observation_length 1024 --observation_topk 256 --window_size 8 --rkv_budget 1024
 ### Induced Answer
-CUDA_VISIBLE_DEVICES=0 python example.py --mode induce_answer --observation_length 1024 --observation_topk 512 
+CUDA_VISIBLE_DEVICES=0 python example.py --mode induce_answer --observation_length 1024 --observation_topk 256 --window_size 8
 
-./run_plot_topk_indices.sh llama3 all 1024 512
+./run_plot_topk_indices.sh llama3 all 1024 256
 
 ## Generate Hit Rate
-./run_plot_topk_indices.sh llama3 all 1024 512 true induced
+./run_plot_topk_indices.sh llama3 all 1024 256 true induced

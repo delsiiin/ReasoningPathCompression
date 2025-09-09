@@ -9,11 +9,20 @@ class H2O:
         budget=128,
         window_size=8,
         record_kept_token_indices=False,
+        layer_idx=None,
+        model_config=None,
+        model_type=None,
+        mode=None,
         **kwargs,
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
         self.budget = budget
         self.window_size = 1
+
+        self.layer_idx = layer_idx
+        self.model_config = model_config
+        self.model_type = model_type
+        self.mode = mode
 
         # for recording kept token indices
         self.record_kept_token_indices = record_kept_token_indices
@@ -47,9 +56,27 @@ class H2O:
             )
 
             # shape: (bsz, num_kv_heads, budget - window_size)
-            indices = attn_weights_sum.topk(
-                self.budget - self.window_size, dim=-1
+            if self.mode == "record_indices":
+                indices = attn_weights_sum.topk(
+                self.model_config.observation_topk, dim=-1
             ).indices
+            else:
+                indices = attn_weights_sum.topk(
+                    self.budget - self.window_size, dim=-1
+                ).indices
+
+            
+
+            if self.mode == "record_indices":
+
+                # Create directory if it doesn't exist
+                folder_path = f'/home/yangx/ReasoningPathCompression/observation/topk_indices/{self.model_type}/h2o'
+                import os 
+                os.makedirs(folder_path, exist_ok=True)
+
+                # Save indices to file
+                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.model_config.observation_length}_top_{self.model_config.observation_topk}.pt'
+                torch.save(indices, save_path)
 
             #####################################################
             ###### Store evicted token indices start ############

@@ -15,6 +15,10 @@ class R1KV:
         retain_ratio=0.1,
         retain_direction="last",
         record_kept_token_indices=False,
+        layer_idx=None,
+        model_config=None,
+        model_type=None,
+        mode=None,
         **kwargs,
     ):
         assert budget - window_size > 0, "budget must be greater than window_size"
@@ -24,6 +28,11 @@ class R1KV:
         self.mix_lambda = mix_lambda
         self.retain_ratio = retain_ratio
         self.retain_direction = retain_direction
+
+        self.layer_idx = layer_idx
+        self.model_config = model_config
+        self.model_type = model_type
+        self.mode = mode
 
         # for recording kept token indices
         self.record_kept_token_indices = record_kept_token_indices
@@ -75,11 +84,23 @@ class R1KV:
             final_score = attn_cache * self.mix_lambda - similarity_cos * (
                 1 - self.mix_lambda
             )
-
             
-
             # shape: (bsz, num_kv_heads, budget - window_size)
-            indices = final_score.topk(self.budget - self.window_size, dim=-1).indices
+            if self.mode == "record_indices":
+                indices = final_score.topk(self.model_config.observation_topk, dim=-1).indices
+            else:
+                indices = final_score.topk(self.budget - self.window_size, dim=-1).indices
+
+            if self.mode == "record_indices":
+
+                # Create directory if it doesn't exist
+                folder_path = f'/home/yangx/ReasoningPathCompression/observation/topk_indices/{self.model_type}/rkv'
+                import os 
+                os.makedirs(folder_path, exist_ok=True)
+
+                # Save indices to file
+                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.model_config.observation_length}_top_{self.model_config.observation_topk}.pt'
+                torch.save(indices, save_path)
 
             #####################################################
             ###### Store evicted token indices start ############

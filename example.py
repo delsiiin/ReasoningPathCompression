@@ -81,6 +81,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
                 "retain_ratio": 0.2,
                 "retain_direction": "last",
                 "first_tokens": 4,
+                "mode": mode,
             },
             "compression": None,
             "update_kv": True
@@ -91,6 +92,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             "compression_content": "think",
             "method": rkv_mode,
             "mode": mode,
+            "observation_length": observation_length,
+            "observation_topk": observation_topk,
         }
 
         tokenizer = AutoTokenizer.from_pretrained(
@@ -143,7 +146,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
             config.update({'mode':mode})
 
-            if mode == "observation_window":
+            if mode == "record_indices":
                 config.update({'observation_length':observation_length})
                 config.update({'observation_topk':observation_topk})
                 config.update({'window_size':window_size})
@@ -168,7 +171,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
             config.update({'mode':mode})
 
-            if mode == "observation_window":
+            if mode == "record_indices":
                 config.update({'observation_length':observation_length})
                 config.update({'observation_topk':observation_topk})
                 config.update({'window_size':window_size})
@@ -306,6 +309,9 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
     else:
 
+        if mode == "record_indices" and rkv:
+            max_new_tokens = observation_length
+
         with torch.no_grad():
             outputs = model.generate(input_ids=inputs['input_ids'],
                                     attention_mask=inputs['attention_mask'],
@@ -341,8 +347,9 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         print(f"\nContext Length: {context_length}")
         print(f"Output Length: {output_length}\n")
 
-    elif mode == "observation_window" or mode == "induce_answer":
-        pass
+    elif mode == "record_indices" or mode == "induce_answer":
+        print(f"\nContext Length: {context_length}")
+        print(f"Output Length: {output_length}\n")
     else:
         # Create data dictionary
         data = {
