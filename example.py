@@ -306,7 +306,9 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         answer_inducer_ids = torch.tensor([answer_inducer_ids], device=input_ids.device)
         answer_inducer_ids = torch.cat([last_token, answer_inducer_ids], dim=1)
         output_dicts = model(input_ids=answer_inducer_ids, past_key_values=past_key_values, prompt_len=context_length)
-
+        outputs = input_ids
+        output_length = outputs[0][context_length:].shape[-1]
+        
     else:
 
         if mode == "record_indices" and rkv:
