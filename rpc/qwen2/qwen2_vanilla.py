@@ -454,7 +454,7 @@ class Qwen2Attention(nn.Module):
                         os.makedirs(folder_path, exist_ok=True)
 
                         # Save indices to file
-                        save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
+                        save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length+prompt_len}_top_{self.config.observation_topk}.pt'
                         torch.save(indices, save_path)
                    
         # repeat k/v heads if n_kv_heads < n_heads

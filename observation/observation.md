@@ -35,14 +35,14 @@ CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_
 ./run_plot_token_confidence.sh llama h2o
 
 ## Compare Important Indices w/ Different Compressed Methods
-### Vanilla Continue Gen (eg. 1024 -> 1152)
-CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 1152  --mode record_indices --observation_length 1024 --observation_topk 256
-### Compression Methods
-CUDA_VISIBLE_DEVICES=0 python example.py --rkv True --rkv_mode snapkv --mode record_indices --observation_length 1024 --observation_topk 256 --window_size 8 --rkv_budget 1024
-### Induced Answer
-CUDA_VISIBLE_DEVICES=0 python example.py --mode induce_answer --observation_length 1024 --observation_topk 256 --window_size 8
+### Vanilla Continue Gen (eg. 1510 = 102 + 128*10 + 128, 1537 = 155(prompt) + 102 + 128*10)
+CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 1510  --mode record_indices --observation_length 1537 --observation_topk 256
+### Compression Methods (eg. 1383 = 1537 - 155 + 1, 1537 = 155(prompt) + 102 + 128*10)
+CUDA_VISIBLE_DEVICES=0 python example.py --rkv True --rkv_mode snapkv --mode record_indices --observation_length 1383 --observation_topk 256 --window_size 8 --rkv_budget 1537
+### Induced Answer (eg. 1382 = 1537 - 155)
+CUDA_VISIBLE_DEVICES=0 python example.py --mode induce_answer --observation_length 1382 --observation_topk 256 --window_size 8
 
-./run_plot_topk_indices.sh llama3 all 1024 256
+./run_plot_topk_indices.sh llama3 all 1537 256
 
 ## Generate Hit Rate
-./run_plot_topk_indices.sh llama3 all 1024 256 true induced
+./run_plot_topk_indices.sh llama3 all 1537 256 true induced
