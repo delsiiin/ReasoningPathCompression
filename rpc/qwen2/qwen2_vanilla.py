@@ -382,7 +382,7 @@ class Qwen2Attention(nn.Module):
             if (q_len == 1) or (q_len != 1 and self.config.mode == "induce_answer"):
                 
                 # cannot use 'past_key_value.get_seq_length'
-                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.prompt_len
+                target_length = past_key_value.key_cache[self.layer_idx].size()[-2]
                 
                 if target_length > self.config.observation_length - self.config.window_size:
                     # cache recent query states as selectors
@@ -437,7 +437,7 @@ class Qwen2Attention(nn.Module):
 
                         attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
                         # [CAUTIOUS ABOUT KEY LENGTH]
-                        attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, prompt_len:-query_states.shape[-2]-self.config.window_size], dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, :-query_states.shape[-2]-self.config.window_size], dim=-1, dtype=torch.float32).to(query_states.dtype)
                         attn_weights_sum = attn_weights_obs.sum(dim = -2)
 
                         attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
@@ -512,7 +512,7 @@ class Qwen2Attention(nn.Module):
                 topk = self.config.observation_topk
 
                 # Extract attention weights for the observation window (excluding prompt and recent window)
-                attn_weights_obs = attn_weights[:, :, :, self.prompt_len:]
+                attn_weights_obs = attn_weights[:, :, :, :]
 
                 attn_weights_sum = attn_weights_obs.view(attn_weights_obs.shape[0], -1, self.num_key_value_groups, attn_weights_obs.shape[-1])
 

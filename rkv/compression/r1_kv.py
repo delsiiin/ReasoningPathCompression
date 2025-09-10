@@ -99,7 +99,7 @@ class R1KV:
                 os.makedirs(folder_path, exist_ok=True)
 
                 # Save indices to file
-                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.model_config.observation_length}_top_{self.model_config.observation_topk}.pt'
+                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.budget}_top_{self.model_config.observation_topk}.pt'
                 torch.save(indices, save_path)
 
             #####################################################
