@@ -513,9 +513,9 @@ def parse_layer_specification(layer_specs):
     
     return sorted(set(layers))  # 去重并排序
 
-def get_available_layers(base_dir, model_type, observation_length=1024, topk=512):
+def get_available_layers(base_dir, model_type, data_type, observation_length=1024, topk=512):
     """获取指定模型的所有可用层"""
-    snapkv_dir = os.path.join(base_dir, model_type, 'snapkv')
+    snapkv_dir = os.path.join(base_dir, model_type, data_type)
     if not os.path.exists(snapkv_dir):
         return []
     
@@ -560,7 +560,7 @@ if __name__ == "__main__":
     
     # 确定要处理的层
     if args.all_layers:
-        layers_to_plot = get_available_layers(args.base_dir, args.model, args.observation_length, args.topk)
+        layers_to_plot = get_available_layers(args.base_dir, args.model, args.reference_data_type, args.observation_length, args.topk)
         if not layers_to_plot:
             print(f"错误: 在 {model_dir} 中未找到任何数据文件")
             exit(1)
