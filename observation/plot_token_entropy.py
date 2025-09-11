@@ -153,6 +153,17 @@ def plot_token_entropy(tensor_path, dict_key=None, bins=50, output_path=None, ti
         print(f"段落数：{len(para_token_len_list)}")
         print(f"段落边界：{para_boundaries}")
         
+        # 输出每个段落开头第一个token对应的entropy（总是显示）
+        print("\n=== 每个段落开头第一个token的entropy值 ===")
+        for i, start_idx in enumerate(para_token_start_idx_list[:-1]):  # 去掉最后一个边界
+            if start_idx < len(values):
+                entropy_val = values[start_idx]
+                first_word = para_first_words[i] if i < len(para_first_words) else f"Para{i+1}"
+                print(f"段落{i+1}: 位置{start_idx}, 第一个词='{first_word}', entropy={entropy_val:.6f}")
+            else:
+                print(f"段落{i+1}: 位置{start_idx} 超出数据范围")
+        print("=" * 50)
+        
         # 如果skip_answer为True，截断entropy数据
         if skip_answer and para_boundaries:
             max_position = para_boundaries[-1]  # 最后一个段落的结束位置

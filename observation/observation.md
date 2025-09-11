@@ -7,7 +7,7 @@ CUDA_VISIBLE_DEVICES=0 python example.py --mode heatmap --model_path "deepseek-a
 ## Generate Token Entropy Using Entropy Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --mode entropy --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
-## Generate Token Confidence Using Entropy Mode
+## Generate Token Confidence Using Confidence Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --mode confidence --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 ## Generate Token-wise Attention Map
@@ -30,7 +30,7 @@ python draw_heat_map.py --model llama --num_layers 32
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode entropy --rkv_budget 1024
 ./run_plot_token_entropy.sh llama h2o
 
-## Generate Token Confidence Using Entropy Mode
+## Generate Token Confidence Using Confidence Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode confidence --rkv_budget 1024
 ./run_plot_token_confidence.sh llama h2o
 

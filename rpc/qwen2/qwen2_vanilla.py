@@ -437,7 +437,7 @@ class Qwen2Attention(nn.Module):
 
                         attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
                         # [CAUTIOUS ABOUT KEY LENGTH]
-                        attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, :-query_states.shape[-2]-self.config.window_size], dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, :-selectors.shape[-2]-self.config.window_size], dim=-1, dtype=torch.float32).to(query_states.dtype)
                         attn_weights_sum = attn_weights_obs.sum(dim = -2)
 
                         attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
