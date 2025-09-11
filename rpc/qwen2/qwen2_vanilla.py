@@ -381,12 +381,13 @@ class Qwen2Attention(nn.Module):
             # Decoding
             if (q_len == 1) or (q_len != 1 and self.config.mode == "induce_answer"):
                 
-                # cannot use 'past_key_value.get_seq_length'
-                target_length = past_key_value.key_cache[self.layer_idx].size()[-2]
-                
-                if target_length > self.config.observation_length - self.config.window_size:
-                    # cache recent query states as selectors
-                    self.cache_recent(query_states)
+                if self.config.mode in ["induce_answer", "record_indices"]:
+                    # cannot use 'past_key_value.get_seq_length'
+                    target_length = past_key_value.key_cache[self.layer_idx].size()[-2]
+                    
+                    if target_length > self.config.observation_length - self.config.window_size:
+                        # cache recent query states as selectors
+                        self.cache_recent(query_states)
 
                 # if target_length == self.config.observation_length and self.config.mode == "observation_window":
                     
