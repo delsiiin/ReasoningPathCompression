@@ -148,6 +148,41 @@ def plot_token_confidence(tensor_path, dict_key=None, bins=50, output_path=None,
     print(f"值的范围: [{y_clean.min():.6f}, {y_clean.max():.6f}]")
     print(f"均值: {y_clean.mean():.6f}, 标准差: {y_clean.std():.6f}")
     
+    # 计算并输出每个段落的confidence平均值
+    if para_boundaries and len(para_boundaries) > 1:
+        print("\n" + "="*60)
+        print("每个段落的confidence平均值:")
+        print("="*60)
+        
+        for i in range(len(para_boundaries) - 1):
+            start_idx = para_boundaries[i]
+            end_idx = para_boundaries[i + 1]
+            
+            # 确保索引在有效范围内
+            start_idx = max(0, min(start_idx, len(values) - 1))
+            end_idx = max(start_idx + 1, min(end_idx, len(values)))
+            
+            # 提取该段落的confidence值
+            para_values = values[start_idx:end_idx]
+            
+            # 计算有效值（排除nan和inf）
+            valid_para_mask = np.isfinite(para_values)
+            valid_para_values = para_values[valid_para_mask]
+            
+            if len(valid_para_values) > 0:
+                para_mean = valid_para_values.mean()
+                para_std = valid_para_values.std()
+                print(f"段落 {i+1:2d}: 位置 [{start_idx:4d}, {end_idx:4d}), "
+                      f"Token数: {end_idx - start_idx:3d}, "
+                      f"平均Confidence: {para_mean:.6f}, "
+                      f"标准差: {para_std:.6f}")
+            else:
+                print(f"段落 {i+1:2d}: 位置 [{start_idx:4d}, {end_idx:4d}), "
+                      f"Token数: {end_idx - start_idx:3d}, "
+                      f"平均Confidence: N/A (无有效值)")
+        
+        print("="*60)
+    
     # 5) 绘制点线图
     plt.figure(figsize=(15, 6))
     plt.plot(x_clean, y_clean, 'o-', linewidth=1.0, markersize=2, alpha=0.8)
