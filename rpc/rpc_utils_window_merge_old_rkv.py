@@ -112,22 +112,21 @@ class RPCCluster():
         else:
             self.cached_recent = torch.cat([self.cached_recent, current_query_states], dim=-2)
 
-    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups):
+    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups, step_start_indices, selectors):
 
-        # selectors = self.cached_recent
-
-        # # # support gqa
-        # key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
-        # value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
+        # # support gqa
+        key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
+        value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
         
-        # bsz, num_heads, q_len, head_dim = selectors.shape
+        bsz, num_heads, q_len, head_dim = selectors.shape
 
   
-        # attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-        # # no need to deal with attention mask
+        attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        # no need to deal with attention mask
 
-        # attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-self.R], dim=-1, dtype=torch.float32).to(selectors.dtype)
-        # attn_weights_sum = attn_weights.sum(dim = -2)
+        attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-selectors.shape[-2]], dim=-1, dtype=torch.float32).to(selectors.dtype)
+        print(attn_weights.shape, "attn_weights_shape")
+        col_sum_accu = attn_weights
 
         # print(attn_weights_sum, 1111111111)
             
@@ -135,117 +134,114 @@ class RPCCluster():
 
         # row_sum_accu = row_sum_accu[..., :-self.R]
         
-        if self.aggregation == 'all':
+        # if self.aggregation == 'all':
 
-            row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, 1, row_sum_accu.shape[-1])
-            col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, 1, col_sum_accu.shape[-1])
+        #     row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, 1, row_sum_accu.shape[-1])
+        #     col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, 1, col_sum_accu.shape[-1])
 
-            if self.agg_func == 'max':
-                row_sum_accu = row_sum_accu.max(dim=1).values
-                col_sum_accu = col_sum_accu.max(dim=1).values
-            elif self.agg_func == 'mean':
-                row_sum_accu = row_sum_accu.mean(dim=1)
-                col_sum_accu = col_sum_accu.mean(dim=1)
-            else:
-                raise ValueError('agg_func not supported')
+        #     if self.agg_func == 'max':
+        #         row_sum_accu = row_sum_accu.max(dim=1).values
+        #         col_sum_accu = col_sum_accu.max(dim=1).values
+        #     elif self.agg_func == 'mean':
+        #         row_sum_accu = row_sum_accu.mean(dim=1)
+        #         col_sum_accu = col_sum_accu.mean(dim=1)
+        #     else:
+        #         raise ValueError('agg_func not supported')
         
-        elif self.aggregation == 'group':
+        # elif self.aggregation == 'group':
 
-            row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, num_key_value_groups, row_sum_accu.shape[-1])
-            col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, num_key_value_groups, col_sum_accu.shape[-1])
+        #     row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, num_key_value_groups, row_sum_accu.shape[-1])
+        #     col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, num_key_value_groups, col_sum_accu.shape[-1])
 
-            if self.agg_func == 'max':
-                row_sum_accu = row_sum_accu.max(dim=-2).values
-                col_sum_accu = col_sum_accu.max(dim=-2).values
-            elif self.agg_func == 'mean':
-                row_sum_accu = row_sum_accu.mean(dim=-2)
-                col_sum_accu = col_sum_accu.mean(dim=-2)
-            else:
-                raise ValueError('agg_func not supported')
+        #     if self.agg_func == 'max':
+        #         row_sum_accu = row_sum_accu.max(dim=-2).values
+        #         col_sum_accu = col_sum_accu.max(dim=-2).values
+        #     elif self.agg_func == 'mean':
+        #         row_sum_accu = row_sum_accu.mean(dim=-2)
+        #         col_sum_accu = col_sum_accu.mean(dim=-2)
+        #     else:
+        #         raise ValueError('agg_func not supported')
 
-        if self.pooling == 'avgpool':
-            row_attn_cache = F.avg_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            col_attn_cache = F.avg_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-        elif self.pooling == 'maxpool':
-            row_attn_cache = F.max_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-            col_attn_cache = F.max_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-        else:
-            raise ValueError('Pooling method not supported')
+        # if self.pooling == 'avgpool':
+        #     row_attn_cache = F.avg_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        #     col_attn_cache = F.avg_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        # elif self.pooling == 'maxpool':
+        #     row_attn_cache = F.max_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        #     col_attn_cache = F.max_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        # else:
+        #     raise ValueError('Pooling method not supported')
 
         alpha = 0.9
-        row_col_sum = alpha * (col_attn_cache / self.R) + (1 - alpha) * (row_attn_cache / self.prompt_len) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
-        indices = row_col_sum.topk(self.budget_cot-self.R, dim=-1, largest=True).indices.sort(dim=-1).values
-        # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
-        # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
-        # indices = torch.cat([row_indices, col_indices], dim=-1) 
-        # indices = torch.sort(indices, dim=-1).values       # 排序
-        # indices = torch.unique(indices, dim=-1)            # 去重
+        row_col_sum = col_sum_accu.mean(dim=1) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
+        print(row_col_sum.shape, "row_col_sum")
 
-        # self.cached_recent = None # for next compress
-
-        # need check
-        if self.aggregation == 'all':
-            batch, n_head, slen = indices.shape
-            sum_indices = indices[:, None, :, :].expand(batch, origin_key_states.size(1) * num_key_value_groups, n_head, slen)
-            sum_indices = sum_indices.reshape(batch, n_head * origin_key_states.size(1) * num_key_value_groups, slen)
-        elif self.aggregation == 'group':
-            batch, n_head, slen = indices.shape
-            sum_indices = indices[:, None, :, :].expand(batch, num_key_value_groups, n_head, slen)
-            sum_indices = sum_indices.reshape(batch, n_head * num_key_value_groups, slen)
-        # row_sum_accu = torch.cat([origin_row_sum_accu.gather(dim = 2, index = sum_indices), origin_row_sum_accu[..., -self.R:]], dim=-1)
-
-        bsz, num_heads, _, head_dim = origin_key_states.shape  
-        # indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
-
-        target_key_states = origin_key_states[:, :, self.prompt_len:-self.R, :]
-        target_value_states = origin_value_states[:, :, self.prompt_len:-self.R, :]
-
-        mask = torch.zeros(target_key_states.shape[:-1], dtype=torch.bool).to(target_key_states.device)
-        mask = mask.scatter(-1, indices, 1)
-
-        k_hh_recent = target_key_states[mask].view(bsz, num_heads, -1, head_dim)
-        v_hh_recent = target_value_states[mask].view(bsz, num_heads, -1, head_dim)
+        # 保存原始的row_col_sum用于topk操作
+        original_row_col_sum = row_col_sum
         
-        # applying merge here
-        # breakpoint()
-        k_hh_pruned = target_key_states[~mask].view(bsz, num_heads, -1, head_dim)
-        v_hh_pruned = target_value_states[~mask].view(bsz, num_heads, -1, head_dim)
-        # similarity = k_hh_pruned @ k_hh_recent.transpose(-1, -2) # dot product
-        similarity = (k_hh_pruned / torch.norm(k_hh_pruned, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)) @ ((k_hh_recent / (torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim))).transpose(-1, -2)) # cosin
-        max_values, max_indices = similarity.max(dim=-1)
-        # breakpoint()   
-        if self.threshold == None:
-            self.threshold = max_values.mean()
-        else:
-            # self.threshold = (self.threshold + max_values.mean()) / 2
-            # breakpoint()
-            self.threshold = 0.3 * self.threshold + 0.7 * max_values.mean()  # 0.3 0.7
-        filter_indices = (max_values.mean(1)>=self.threshold).squeeze(0)
-        merged_indices = max_indices[..., filter_indices].unsqueeze(-1).repeat(1, 1, 1, head_dim)
-        merge_weights = max_values[..., filter_indices].unsqueeze(-1).repeat(1, 1, 1, head_dim)
+        # 根据step_start_indices对每个分区在row_col_sum的最后一维求和，累计除最后一段的其他step
+        if step_start_indices is not None:
+            print(step_start_indices, "step_start_indices")
+            partitioned_sums = []
+            # 只处理除最后一个step之外的所有step
+            for i in range(len(step_start_indices) - 2):  # 排除最后一个step
+                start_idx = step_start_indices[i]
+                end_idx = step_start_indices[i + 1]
+                partition_sum = row_col_sum[..., start_idx:end_idx].sum(dim=-1).mean(dim=1).unsqueeze(1)  # 计算每个分区的和并保持维度
+                partitioned_sums.append(partition_sum)
+                print(partition_sum.shape, "partition_sum")
+            step_scores = torch.cat(partitioned_sums, dim=-1)  # 形状: (bsz, n_steps-1) 排除最后一个step
+            print(step_scores, "step_scores")
+            # 在step级别取topk，现在k_steps应该基于排除最后一个step后的数量
+            k_steps = step_scores.size(-1) - 1 if step_scores.size(-1) > 1 else step_scores.size(-1)
+            topk_step_values, topk_step_indices = torch.topk(step_scores, k=k_steps, dim=-1, largest=True)
+            
+            # 将step索引映射回原始序列索引
+            selected_indices = []
+            for batch_idx in range(topk_step_indices.size(0)):
+                batch_indices = []
+                for step_idx in topk_step_indices[batch_idx]:
+                    step_idx = step_idx.item()
+                    start_pos = step_start_indices[step_idx]
+                    end_pos = step_start_indices[step_idx + 1] if step_idx + 1 < len(step_start_indices) else original_row_col_sum.size(-1)
+                    # 在该step内选择所有token
+                    step_token_indices = torch.arange(start_pos, end_pos, device=original_row_col_sum.device)
+                    print(step_token_indices, "step_token_indices")
+                    batch_indices.append(step_token_indices)
+                selected_indices.append(torch.cat(batch_indices))
 
-        k_hh_merged = k_hh_pruned[..., filter_indices, :]
-        # k_hh_recent = torch.scatter_reduce(input=k_hh_recent, dim=2, index=merged_indices, src=merge_weights*k_hh_merged, reduce='mean', include_self=True)
-        k_hh_recent = scatter_reduce_ema(input=k_hh_recent, dim=2, index=merged_indices, src_merge=k_hh_merged, merge_weights=merge_weights)
-    
-        v_hh_merged = v_hh_pruned[..., filter_indices, :]
-        # v_hh_recent = torch.scatter_reduce(input=v_hh_recent, dim=2, index=merged_indices, src=merge_weights*v_hh_merged, reduce='mean', include_self=True)
-        v_hh_recent = scatter_reduce_ema(input=v_hh_recent, dim=2, index=merged_indices, src_merge=v_hh_merged, merge_weights=merge_weights)
-    
+            # 对selected_indices的最后一维进行排序
+            for batch_idx in range(len(selected_indices)):
+                selected_indices[batch_idx] = torch.sort(selected_indices[batch_idx])[0]
+
+            print(selected_indices, "selected_indices")
+            
+            # 重新组织索引张量
+            max_tokens = max(len(idx) for idx in selected_indices)
+            indices_tensor = torch.zeros(topk_step_indices.size(0), max_tokens, 
+                                       dtype=torch.long, device=original_row_col_sum.device)
+            
+            for batch_idx, idx_list in enumerate(selected_indices):
+                # 再次确保索引不超出past_seq_len
+                indices_tensor[batch_idx, :len(idx_list)] = idx_list
+                
+            # 扩展维度以便后续的gather操作
+            # 需要为所有head复制相同的索引，并扩展最后一维
+            indices = indices_tensor.unsqueeze(1).expand(-1, origin_key_states.size(1), -1).unsqueeze(-1).expand(-1, -1, -1, origin_key_states.size(-1))
+            print(indices.shape, "final_indices_shape")
+        # self.cached_recent = None # for next compress
 
         # support gqa
         if self.aggregation == 'all' or 'group':
             k_prompt = origin_key_states[:, :, :self.prompt_len, :]
             v_prompt = origin_value_states[:, :, :self.prompt_len, :]
+        
+            k_past_compress = origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].gather(dim = 2, index = indices)
+            v_past_compress = origin_value_states[:, :, self.prompt_len:-selectors.shape[-2], :].gather(dim = 2, index = indices)
 
-            # k_past_compress = origin_key_states[:, :, self.prompt_len:-self.R, :].gather(dim = 2, index = indices)
-            # v_past_compress = origin_value_states[:, :, self.prompt_len:-self.R, :].gather(dim = 2, index = indices)
+            print(origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].shape, "k_past_compress_shape")
 
-            k_past_compress = k_hh_recent
-            v_past_compress = v_hh_recent
-            
-            k_cur = origin_key_states[:, :, -self.R:, :]
-            v_cur = origin_value_states[:, :, -self.R:, :]
+            k_cur = origin_key_states[:, :, -selectors.shape[-2]:, :]
+            v_cur = origin_value_states[:, :, -selectors.shape[-2]:, :]
 
         else:
             k_prompt = key_states[:, :, :self.prompt_len, :]

@@ -76,7 +76,7 @@ def enable_rpc(mode=None):
 
         QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
-        Qwen2ForCausalLM.prepare_inputs_for_generation = Qwen2RPCForCausalLM.prepare_inputs_for_generation
+        Qwen2ForCausalLM.forward = Qwen2RPCForCausalLM.forward
 
     elif mode == "ours_window_merge_rkv_dynamic":
         from rpc.llama.llama_custom_window_merge_old_rkv_dynamic import LlamaRPCAttention, LlamaRPCModel, LlamaRPCForCausalLM
