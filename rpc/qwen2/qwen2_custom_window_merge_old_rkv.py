@@ -79,9 +79,9 @@ class Qwen2RPCAttention(Qwen2Attention):
         self.col_sum_accu = None
 
         self.question_cache = None
-        
-        self.step_start_indices = [0]
-        self.is_new_step = 1
+
+        self.step_lens = []
+        self.is_new_step = False
 
     def cal_similarity(
         self,
@@ -132,35 +132,6 @@ class Qwen2RPCAttention(Qwen2Attention):
             torch.arange(num_heads).unsqueeze(1).repeat(1, similarity_retain.size(1))
         )
         seq_idx = torch.arange(similarity_retain.size(1)).unsqueeze(0).repeat(num_heads, 1)
-
-
-
-        # print("cos shape:", similarity_cos.shape)  # 期望 [B, S, S?] 之类
-        # print("batch_idx:", batch_idx, type(batch_idx))
-        # print("seq_idx:", seq_idx, type(seq_idx))
-        # print("retain shape/dtype/dev:", getattr(similarity_retain, "shape", None),
-        #     getattr(similarity_retain, "dtype", None), getattr(similarity_retain, "device", None))
-
-        # # 1) 保证 batch_idx / seq_idx 是标量（而非向量索引）
-        # if torch.is_tensor(batch_idx):
-        #     assert batch_idx.ndim == 0, "batch_idx 应为标量"
-        # if torch.is_tensor(seq_idx):
-        #     assert seq_idx.ndim == 0, "seq_idx 应为标量"
-
-        # # 2) 索引类型与范围
-        # assert similarity_retain.dtype in (torch.long, torch.int64) or similarity_retain.dtype == torch.bool
-        # if similarity_retain.dtype != torch.bool:
-        #     mn = int(similarity_retain.min().item())
-        #     mx = int(similarity_retain.max().item())
-        #     print("retain min/max:", mn, mx)
-        #     assert mn >= 0, "存在负索引（如 -1）"
-        #     assert mx < similarity_cos.size(2), "存在越界索引"
-
-        # # 3) 设备一致
-        # assert similarity_cos.device == (similarity_retain.device if torch.is_tensor(similarity_retain) else similarity_cos.device)
-
-
-
 
         # zero the specified positions in similarity_cos
         similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
@@ -216,8 +187,8 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.layer_budget_importance = None
                 self.cache_mode = "vanilla"
                 self.question_cache = query_states
-                self.step_start_indices = [0]
-                self.is_new_step = 1
+                self.step_lens = []
+                self.is_new_step = False
                 if hasattr(self, "_cot_done_printed"):
                     delattr(self, "_cot_done_printed")
     
@@ -248,51 +219,60 @@ class Qwen2RPCAttention(Qwen2Attention):
             attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
-            if self.is_new_step == len(self.step_start_indices):
+            if not self.is_new_step:
                 self.kv_cluster.cache_recent(query_states)
             else:
-                self.is_new_step += 1
                 selectors = self.kv_cluster.cached_recent
                 self.kv_cluster.cached_recent = None
                 self.kv_cluster.cache_recent(query_states)
+                self.is_new_step = False
 
             # cannot use 'past_key_value.get_seq_length'
             target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len 
                 
             if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
-                
-                question = self.question_cache
 
-                bsz, num_heads, ques_len, head_dim = question.shape
+                if self.layer_idx == 5:
+                    print(selectors.shape[-2], "selectors.shape")
+                
+                # question = self.question_cache
+
+                # bsz, num_heads, ques_len, head_dim = question.shape
 
         
-                ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-                # no need to deal with attention mask
+                # ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+                # # no need to deal with attention mask
 
-                ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:], dim=-1, dtype=torch.float32).to(question.dtype)
-                ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
+                # ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:], dim=-1, dtype=torch.float32).to(question.dtype)
+                # ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
+
+                ques_attn_weights_sum = None
 
                 key_states = restore_kv(key_states, self.num_key_value_groups)
                 value_states = restore_kv(value_states, self.num_key_value_groups)
                 
-                key_states_compress, value_states_compress= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_start_indices, selectors)
+                key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, selectors)
 
-                if key_states_compress.size(-2) - self.kv_cluster.prompt_len >= self.kv_cluster.budget_cot:
+                self.step_lens = updated_step_lens
 
-                    print(key_states_compress, "key_states_compress before second compression")
+                if key_states_compress.size(-2) - self.kv_cluster.prompt_len > self.kv_cluster.budget_cot:
+
+                    # print(key_states_compress, "key_states_compress before second compression")
                     
                     similarity_cos = self.cal_similarity(
                         key_states_compress[..., self.kv_cluster.prompt_len:, :],
                         retain_ratio=0.2,
                         retain_direction="last",
                     )[..., :-selectors.shape[-2]]
-                    print(similarity_cos.shape, "similarity_cos")
+                    # print(similarity_cos.shape, "similarity_cos")
                     # 选择similarity_cos中最小的budget_cot个位置
                     _, min_indices = torch.topk(similarity_cos, k=self.kv_cluster.budget_cot - selectors.shape[-2], dim=-1, largest=False)
                     
                     # 对索引进行排序以保持原始顺序
                     min_indices_sorted, _ = torch.sort(min_indices, dim=-1)
-                    print(min_indices_sorted.shape, "min_indices_sorted")
+                    # print(min_indices_sorted.shape, "min_indices_sorted")
+
+
                     
                     # 添加prompt部分的索引
                     prompt_indices = torch.arange(self.kv_cluster.prompt_len, device=key_states_compress.device).unsqueeze(0).unsqueeze(0).expand(bsz, key_states_compress.size(1), -1)
@@ -308,7 +288,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                     # 合并所有索引
                     final_indices = torch.cat([prompt_indices, compress_indices.unsqueeze(0), recent_indices], dim=-1)
 
-                    print(final_indices.shape, "final_indices")
+                    # print(final_indices.shape, "final_indices")
                     
                     # 扩展索引维度以便gather操作
                     gather_indices = final_indices.unsqueeze(-1).expand(-1, key_states_compress.size(1), -1, key_states_compress.size(-1))
@@ -316,6 +296,35 @@ class Qwen2RPCAttention(Qwen2Attention):
                     # 进行再次压缩
                     key_states_compress = key_states_compress.gather(dim=2, index=gather_indices)
                     value_states_compress = value_states_compress.gather(dim=2, index=gather_indices)
+
+                    # print(key_states_compress.shape, "key_states_compress after second compression")
+                    
+                    # 更新step_lens以反映二次压缩后的结果
+                    # min_indices_sorted是相对于prompt之后部分的索引，需要映射到step_lens
+                    if len(self.step_lens) > 0:
+                        # 根据step_lens计算每个step的起始索引（相对于prompt之后）
+                        step_start_indices = [0]
+                        for length in self.step_lens[:-1]:  # 除最后一个step外
+                            step_start_indices.append(step_start_indices[-1] + length)
+                        
+                        # 统计每个step中有多少token被保留
+                        new_step_lens = []
+                        for i, step_len in enumerate(self.step_lens[:-1]):  # 除最后一个step外
+                            start_idx = step_start_indices[i]
+                            end_idx = start_idx + step_len
+                            
+                            # 计算该step范围内被保留的token数量
+                            retained_count = 0
+                            for idx in min_indices_sorted[0]:  # 使用第一个batch的索引
+                                if start_idx <= idx.item() < end_idx:
+                                    retained_count += 1
+                            
+                            if retained_count > 0:  # 只保留非零长度的step
+                                new_step_lens.append(retained_count)
+                        
+                        # 保留最后一个step（recent tokens）
+                        new_step_lens.append(self.step_lens[-1])
+                        self.step_lens = new_step_lens
 
                 
                 # replace with compressed cache
@@ -584,9 +593,10 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
         # assume non-batch input, shape: [1, logits_to_keep, vocab_size]
         predicted_token_ids = logits[:, -1, :].argmax(dim=-1)
 
-        self.CoT_done = (
-            predicted_token_ids[0].cpu().item() in self.CoT_done_token_ids
-        )
+        if not self.CoT_done:
+            self.CoT_done = (
+                predicted_token_ids[0].cpu().item() in self.CoT_done_token_ids
+            )
 
         # Apply softmax to get probabilities
         probs = F.softmax(logits, dim=-1)
@@ -613,7 +623,8 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
 
         if self.is_newline and entropy >= 0.3 and not self.CoT_done and not self.early_exit and self.current_step_len > 5:
             for layer in self.model.layers:
-                layer.self_attn.step_start_indices.append(self.current_step_len-1+layer.self_attn.step_start_indices[-1])
+                layer.self_attn.step_lens.append(self.current_step_len)
+                layer.self_attn.is_new_step = True
             
             # Check if average confidence is below threshold for early exiting
             # if len(self.step_confidences) > 0:

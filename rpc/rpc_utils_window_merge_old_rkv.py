@@ -112,7 +112,7 @@ class RPCCluster():
         else:
             self.cached_recent = torch.cat([self.cached_recent, current_query_states], dim=-2)
 
-    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups, step_start_indices, selectors):
+    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups, step_lens, selectors):
 
         # # support gqa
         key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
@@ -125,7 +125,7 @@ class RPCCluster():
         # no need to deal with attention mask
 
         attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-selectors.shape[-2]], dim=-1, dtype=torch.float32).to(selectors.dtype)
-        print(attn_weights.shape, "attn_weights_shape")
+        # print(attn_weights.shape, "attn_weights_shape")
         col_sum_accu = attn_weights
 
         # print(attn_weights_sum, 1111111111)
@@ -173,61 +173,81 @@ class RPCCluster():
 
         alpha = 0.9
         row_col_sum = col_sum_accu.mean(dim=1) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
-        print(row_col_sum.shape, "row_col_sum")
+        # print(row_col_sum.shape, "row_col_sum")
 
         # 保存原始的row_col_sum用于topk操作
         original_row_col_sum = row_col_sum
         
-        # 根据step_start_indices对每个分区在row_col_sum的最后一维求和，累计除最后一段的其他step
-        if step_start_indices is not None:
-            print(step_start_indices, "step_start_indices")
+        # 根据step_lens对每个分区在row_col_sum的最后一维求和，累计除最后一段的其他step
+        if step_lens is not None:
+            # print(step_lens, "step_lens")
+            # 根据step长度计算每个step的起始索引
+            step_start_indices = [0]
+            for length in step_lens[:-1]:  # 除最后一个step外
+                step_start_indices.append(step_start_indices[-1] + length)
+            
             partitioned_sums = []
             # 只处理除最后一个step之外的所有step
-            for i in range(len(step_start_indices) - 2):  # 排除最后一个step
+            for i in range(len(step_lens) - 1):  # 排除最后一个step
                 start_idx = step_start_indices[i]
-                end_idx = step_start_indices[i + 1]
+                end_idx = step_start_indices[i] + step_lens[i]
                 partition_sum = row_col_sum[..., start_idx:end_idx].sum(dim=-1).mean(dim=1).unsqueeze(1)  # 计算每个分区的和并保持维度
                 partitioned_sums.append(partition_sum)
-                print(partition_sum.shape, "partition_sum")
+                # print(partition_sum.shape, "partition_sum")
             step_scores = torch.cat(partitioned_sums, dim=-1)  # 形状: (bsz, n_steps-1) 排除最后一个step
-            print(step_scores, "step_scores")
+            # print(step_scores, "step_scores")
             # 在step级别取topk，现在k_steps应该基于排除最后一个step后的数量
             k_steps = step_scores.size(-1) - 1 if step_scores.size(-1) > 1 else step_scores.size(-1)
             topk_step_values, topk_step_indices = torch.topk(step_scores, k=k_steps, dim=-1, largest=True)
+
+            # if self.layer_idx == 0:
+            #     print(step_lens, "step_lens")
             
             # 将step索引映射回原始序列索引
             selected_indices = []
             for batch_idx in range(topk_step_indices.size(0)):
                 batch_indices = []
                 for step_idx in topk_step_indices[batch_idx]:
-                    step_idx = step_idx.item()
+                    step_idx = step_idx.item()  # 只在需要时提取单个值
                     start_pos = step_start_indices[step_idx]
-                    end_pos = step_start_indices[step_idx + 1] if step_idx + 1 < len(step_start_indices) else original_row_col_sum.size(-1)
-                    # 在该step内选择所有token
+                    end_pos = start_pos + step_lens[step_idx]
+                    # 在该step内选择所有token，保持在GPU上
                     step_token_indices = torch.arange(start_pos, end_pos, device=original_row_col_sum.device)
-                    print(step_token_indices, "step_token_indices")
+                    # print(step_token_indices, "step_token_indices")
                     batch_indices.append(step_token_indices)
                 selected_indices.append(torch.cat(batch_indices))
+
+            # 更新step_lens，仅保留topk选出的step，按照原step顺序排列
+            # 对于batch中的第一个样本，选择topk的step索引（假设batch中所有样本的step选择相同）
+            selected_step_indices = topk_step_indices[0]  # 保持在GPU上
+            # 对选中的step索引按照原始顺序排序，保持在GPU上
+            selected_step_indices_sorted, _ = torch.sort(selected_step_indices)
+            # 直接使用GPU张量进行索引操作，避免CPU转换
+            selected_step_lens = [step_lens[i.item()] for i in selected_step_indices_sorted] + [step_lens[-1]]  # 保留最后一个step
+            step_lens = selected_step_lens
+
+            # if self.layer_idx == 0:
+            #     print(selected_step_indices_sorted, "selected_step_indices_sorted")
+            #     print(step_lens, "step_lens_updated")
 
             # 对selected_indices的最后一维进行排序
             for batch_idx in range(len(selected_indices)):
                 selected_indices[batch_idx] = torch.sort(selected_indices[batch_idx])[0]
 
-            print(selected_indices, "selected_indices")
+            # if self.layer_idx == 0:
+            #     print(selected_indices, "selected_indices")
             
-            # 重新组织索引张量
-            max_tokens = max(len(idx) for idx in selected_indices)
-            indices_tensor = torch.zeros(topk_step_indices.size(0), max_tokens, 
-                                       dtype=torch.long, device=original_row_col_sum.device)
-            
-            for batch_idx, idx_list in enumerate(selected_indices):
-                # 再次确保索引不超出past_seq_len
-                indices_tensor[batch_idx, :len(idx_list)] = idx_list
-                
-            # 扩展维度以便后续的gather操作
-            # 需要为所有head复制相同的索引，并扩展最后一维
-            indices = indices_tensor.unsqueeze(1).expand(-1, origin_key_states.size(1), -1).unsqueeze(-1).expand(-1, -1, -1, origin_key_states.size(-1))
-            print(indices.shape, "final_indices_shape")
+            # 直接对selected_indices进行维度扩展，用于gather操作
+            # 将每个batch的索引扩展到 (num_heads, seq_len, head_dim) 的形状
+            indices = []
+            for idx_list in selected_indices:
+                # 扩展维度: (seq_len,) -> (num_heads, seq_len, head_dim)
+                expanded_idx = idx_list.unsqueeze(0).unsqueeze(-1).expand(
+                    origin_key_states.size(1), -1, origin_key_states.size(-1)
+                )
+                indices.append(expanded_idx)
+            indices = torch.stack(indices, dim=0)  # 堆叠成 (batch_size, num_heads, seq_len, head_dim)
+            # print(indices.shape, "final_indices_shape")
         # self.cached_recent = None # for next compress
 
         # support gqa
@@ -238,7 +258,7 @@ class RPCCluster():
             k_past_compress = origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].gather(dim = 2, index = indices)
             v_past_compress = origin_value_states[:, :, self.prompt_len:-selectors.shape[-2], :].gather(dim = 2, index = indices)
 
-            print(origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].shape, "k_past_compress_shape")
+            # print(origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].shape, "k_past_compress_shape")
 
             k_cur = origin_key_states[:, :, -selectors.shape[-2]:, :]
             v_cur = origin_value_states[:, :, -selectors.shape[-2]:, :]
@@ -257,7 +277,7 @@ class RPCCluster():
         value_states = torch.cat([v_prompt, v_past_compress, v_cur], dim = 2)
 
 
-        return key_states, value_states
+        return key_states, value_states, step_lens
    
 
 def init_rpc(self):
