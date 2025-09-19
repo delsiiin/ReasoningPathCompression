@@ -120,11 +120,17 @@ class RPCCluster():
         
         bsz, num_heads, q_len, head_dim = selectors.shape
 
-  
-        attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        # 记录注意力权重计算时间
+        # attn_start_time = time.time()
+        attn_weights = torch.matmul(selectors[..., -self.R:, :], key_states.transpose(2, 3)) / math.sqrt(head_dim)
         # no need to deal with attention mask
 
-        attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-selectors.shape[-2]], dim=-1, dtype=torch.float32).to(selectors.dtype)
+        attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-self.R], dim=-1, dtype=torch.float32).to(selectors.dtype)
+        # attn_end_time = time.time()
+        # attn_time = attn_end_time - attn_start_time
+        # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
+        #     print(f"Attention weights calculation time: {attn_time:.4f}s")
+        
         # print(attn_weights.shape, "attn_weights_shape")
         col_sum_accu = attn_weights
 
@@ -174,12 +180,10 @@ class RPCCluster():
         alpha = 0.9
         row_col_sum = col_sum_accu.mean(dim=1) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
         # print(row_col_sum.shape, "row_col_sum")
-
-        # 保存原始的row_col_sum用于topk操作
-        original_row_col_sum = row_col_sum
         
         # 根据step_lens对每个分区在row_col_sum的最后一维求和，累计除最后一段的其他step
         if step_lens is not None:
+            # start_time = time.time()
             # print(step_lens, "step_lens")
             # 根据step长度计算每个step的起始索引
             step_start_indices = [0]
@@ -198,7 +202,7 @@ class RPCCluster():
             # print(step_scores, "step_scores")
             # 在step级别取topk，现在k_steps应该基于排除最后一个step后的数量
             k_steps = step_scores.size(-1) - 1 if step_scores.size(-1) > 1 else step_scores.size(-1)
-            topk_step_values, topk_step_indices = torch.topk(step_scores, k=k_steps, dim=-1, largest=True)
+            topk_step_indices = torch.topk(step_scores, k=k_steps, dim=-1, largest=True).indices
 
             # if self.layer_idx == 0:
             #     print(step_lens, "step_lens")
@@ -212,7 +216,7 @@ class RPCCluster():
                     start_pos = step_start_indices[step_idx]
                     end_pos = start_pos + step_lens[step_idx]
                     # 在该step内选择所有token，保持在GPU上
-                    step_token_indices = torch.arange(start_pos, end_pos, device=original_row_col_sum.device)
+                    step_token_indices = torch.arange(start_pos, end_pos, device=row_col_sum.device)
                     # print(step_token_indices, "step_token_indices")
                     batch_indices.append(step_token_indices)
                 selected_indices.append(torch.cat(batch_indices))
@@ -221,7 +225,7 @@ class RPCCluster():
             # 对于batch中的第一个样本，选择topk的step索引（假设batch中所有样本的step选择相同）
             selected_step_indices = topk_step_indices[0]  # 保持在GPU上
             # 对选中的step索引按照原始顺序排序，保持在GPU上
-            selected_step_indices_sorted, _ = torch.sort(selected_step_indices)
+            selected_step_indices_sorted = torch.sort(selected_step_indices).values
             # 直接使用GPU张量进行索引操作，避免CPU转换
             selected_step_lens = [step_lens[i.item()] for i in selected_step_indices_sorted] + [step_lens[-1]]  # 保留最后一个step
             step_lens = selected_step_lens
@@ -248,8 +252,12 @@ class RPCCluster():
                 indices.append(expanded_idx)
             indices = torch.stack(indices, dim=0)  # 堆叠成 (batch_size, num_heads, seq_len, head_dim)
             # print(indices.shape, "final_indices_shape")
-        # self.cached_recent = None # for next compress
-
+            
+            # end_time = time.time()
+            # compression_time = end_time - start_time
+            # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
+            #     print(f"Step compression time: {compression_time:.4f}s")
+        
         # support gqa
         if self.aggregation == 'all' or 'group':
             k_prompt = origin_key_states[:, :, :self.prompt_len, :]

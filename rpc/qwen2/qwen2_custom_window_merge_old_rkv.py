@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
 import warnings
+import time
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from .qwen2_vanilla import (
@@ -18,6 +19,11 @@ from transformers.utils import (
 )
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from rpc.rpc_utils_window_merge_old_rkv import init_rpc
+from rpc.step_lens_optimizer import (
+    update_step_lens_optimized,
+    build_final_indices_optimized,
+    efficient_gather_operation
+)
 
 import math
 import numpy as np
@@ -229,11 +235,13 @@ class Qwen2RPCAttention(Qwen2Attention):
 
             # cannot use 'past_key_value.get_seq_length'
             target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len 
-                
+
             if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
 
-                if self.layer_idx == 5:
-                    print(selectors.shape[-2], "selectors.shape")
+                print(target_length, "target_length")
+
+                # if self.layer_idx == 5:
+                #     print(selectors.shape[-2], "selectors.shape")
                 
                 # question = self.question_cache
 
@@ -266,65 +274,46 @@ class Qwen2RPCAttention(Qwen2Attention):
                     )[..., :-selectors.shape[-2]]
                     # print(similarity_cos.shape, "similarity_cos")
                     # 选择similarity_cos中最小的budget_cot个位置
-                    _, min_indices = torch.topk(similarity_cos, k=self.kv_cluster.budget_cot - selectors.shape[-2], dim=-1, largest=False)
+                    min_indices = torch.topk(similarity_cos, k=self.kv_cluster.budget_cot - selectors.shape[-2], dim=-1, largest=False).indices
                     
                     # 对索引进行排序以保持原始顺序
-                    min_indices_sorted, _ = torch.sort(min_indices, dim=-1)
+                    min_indices_sorted = torch.sort(min_indices, dim=-1).values
                     # print(min_indices_sorted.shape, "min_indices_sorted")
 
 
                     
-                    # 添加prompt部分的索引
-                    prompt_indices = torch.arange(self.kv_cluster.prompt_len, device=key_states_compress.device).unsqueeze(0).unsqueeze(0).expand(bsz, key_states_compress.size(1), -1)
+                    # 使用优化的索引构建和gather操作
+                    device = key_states_compress.device
+                    seq_len = key_states_compress.size(-2)
+                    num_heads = key_states_compress.size(1)
+                    recent_len = selectors.shape[-2]
                     
-                    # 将压缩部分的索引调整到正确的位置（加上prompt_len偏移）
-                    compress_indices = min_indices_sorted + self.kv_cluster.prompt_len
-
-                    # 添加最后selectors.shape[-2]个位置的索引
-                    recent_indices = torch.arange(key_states_compress.size(-2) - selectors.shape[-2], 
-                                                key_states_compress.size(-2), 
-                                                device=key_states_compress.device).unsqueeze(0).unsqueeze(0).expand(bsz, key_states_compress.size(1), -1)
+                    # 高效构建final_indices
+                    final_indices = build_final_indices_optimized(
+                        bsz, num_heads, self.kv_cluster.prompt_len,
+                        min_indices_sorted, seq_len, recent_len, device
+                    )
                     
-                    # 合并所有索引
-                    final_indices = torch.cat([prompt_indices, compress_indices.unsqueeze(0), recent_indices], dim=-1)
-
-                    # print(final_indices.shape, "final_indices")
-                    
-                    # 扩展索引维度以便gather操作
-                    gather_indices = final_indices.unsqueeze(-1).expand(-1, key_states_compress.size(1), -1, key_states_compress.size(-1))
-                    
-                    # 进行再次压缩
-                    key_states_compress = key_states_compress.gather(dim=2, index=gather_indices)
-                    value_states_compress = value_states_compress.gather(dim=2, index=gather_indices)
+                    # 高效进行gather操作
+                    key_states_compress, value_states_compress = efficient_gather_operation(
+                        key_states_compress, value_states_compress, final_indices
+                    )
 
                     # print(key_states_compress.shape, "key_states_compress after second compression")
                     
-                    # 更新step_lens以反映二次压缩后的结果
-                    # min_indices_sorted是相对于prompt之后部分的索引，需要映射到step_lens
+                    # 高效更新step_lens - 使用优化的向量化实现
+                    # step_lens_start_time = time.time()
                     if len(self.step_lens) > 0:
-                        # 根据step_lens计算每个step的起始索引（相对于prompt之后）
-                        step_start_indices = [0]
-                        for length in self.step_lens[:-1]:  # 除最后一个step外
-                            step_start_indices.append(step_start_indices[-1] + length)
+                        self.step_lens = update_step_lens_optimized(
+                            self.step_lens, 
+                            min_indices_sorted[0], 
+                            min_indices_sorted.device
+                        )
                         
-                        # 统计每个step中有多少token被保留
-                        new_step_lens = []
-                        for i, step_len in enumerate(self.step_lens[:-1]):  # 除最后一个step外
-                            start_idx = step_start_indices[i]
-                            end_idx = start_idx + step_len
-                            
-                            # 计算该step范围内被保留的token数量
-                            retained_count = 0
-                            for idx in min_indices_sorted[0]:  # 使用第一个batch的索引
-                                if start_idx <= idx.item() < end_idx:
-                                    retained_count += 1
-                            
-                            if retained_count > 0:  # 只保留非零长度的step
-                                new_step_lens.append(retained_count)
-                        
-                        # 保留最后一个step（recent tokens）
-                        new_step_lens.append(self.step_lens[-1])
-                        self.step_lens = new_step_lens
+                        # step_lens_end_time = time.time()
+                        # step_lens_update_time = step_lens_end_time - step_lens_start_time
+                        # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
+                        #     print(f"Step_lens update time: {step_lens_update_time:.4f}s")
 
                 
                 # replace with compressed cache
@@ -607,21 +596,21 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
         log_probs = torch.log(probs + epsilon)
         entropy = -torch.sum(probs * log_probs, dim=-1)
 
-        # Get top-k probabilities
-        k = getattr(self.config, 'topk_size', 20)  # Default to top-20 if not specified
-        # Get top-k probabilities
-        topk_probs, _ = torch.topk(probs, k, dim=-1)
-        # Calculate log of top-k probabilities and negative mean
-        epsilon = 1e-8  # Avoid log(0)
-        topk_log_probs = torch.log(topk_probs + epsilon)
-        neg_mean_topk_log_prob = -torch.mean(topk_log_probs, dim=-1)
+        # # Get top-k probabilities
+        # k = getattr(self.config, 'topk_size', 20)  # Default to top-20 if not specified
+        # # Get top-k probabilities
+        # topk_probs, _ = torch.topk(probs, k, dim=-1)
+        # # Calculate log of top-k probabilities and negative mean
+        # epsilon = 1e-8  # Avoid log(0)
+        # topk_log_probs = torch.log(topk_probs + epsilon)
+        # neg_mean_topk_log_prob = -torch.mean(topk_log_probs, dim=-1)
 
         # print(f"Predicted Token ID: {predicted_token_ids[0].item()}, Entropy: {entropy.item():.4f}, Neg Mean Top-{k} Log Prob: {neg_mean_topk_log_prob.item():.4f}")
 
         self.current_step_len += 1
-        self.step_confidences.append(neg_mean_topk_log_prob.item())
+        # self.step_confidences.append(neg_mean_topk_log_prob.item())
 
-        if self.is_newline and entropy >= 0.3 and not self.CoT_done and not self.early_exit and self.current_step_len > 5:
+        if self.is_newline and entropy >= 0.3 and not self.CoT_done and not self.early_exit and self.current_step_len >= self.model.layers[0].self_attn.kv_cluster.R:
             for layer in self.model.layers:
                 layer.self_attn.step_lens.append(self.current_step_len)
                 layer.self_attn.is_new_step = True
