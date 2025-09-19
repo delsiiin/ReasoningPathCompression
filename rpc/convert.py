@@ -66,7 +66,7 @@ def enable_rpc(mode=None):
 
     elif mode == "ours_window_merge_rkv":
         from rpc.llama.llama_custom_window_merge_old_rkv import LlamaRPCAttention, LlamaRPCModel, LlamaRPCForCausalLM
-        from rpc.qwen2.qwen2_custom_window_merge_old_rkv import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM
+        from rpc.qwen2.qwen2_custom_window_merge_old_rkv import Qwen2RPCAttention, Qwen2RPCModel, Qwen2RPCForCausalLM, Qwen2RPCFlashAttention
 
         # cant get attn_weights from flash-attn
         LLAMA_ATTENTION_CLASSES['eager'] = LlamaRPCAttention
@@ -75,6 +75,7 @@ def enable_rpc(mode=None):
         
 
         QWEN2_ATTENTION_CLASSES['eager'] = Qwen2RPCAttention
+        QWEN2_ATTENTION_CLASSES['flash_attention_2'] = Qwen2RPCFlashAttention
         Qwen2Model.forward = Qwen2RPCModel.forward
         Qwen2ForCausalLM.forward = Qwen2RPCForCausalLM.forward
 
