@@ -112,17 +112,19 @@ class RPCCluster():
         else:
             self.cached_recent = torch.cat([self.cached_recent, current_query_states], dim=-2)
 
-    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups, step_lens, selectors):
+    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups, step_lens, current_step_len):
 
         # # support gqa
         key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
         value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
+
+        selectors = self.cached_recent
         
         bsz, num_heads, q_len, head_dim = selectors.shape
 
         # 记录注意力权重计算时间
         # attn_start_time = time.time()
-        attn_weights = torch.matmul(selectors[..., -self.R:, :], key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
         # no need to deal with attention mask
 
         attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-self.R], dim=-1, dtype=torch.float32).to(selectors.dtype)
@@ -263,13 +265,13 @@ class RPCCluster():
             k_prompt = origin_key_states[:, :, :self.prompt_len, :]
             v_prompt = origin_value_states[:, :, :self.prompt_len, :]
         
-            k_past_compress = origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].gather(dim = 2, index = indices)
-            v_past_compress = origin_value_states[:, :, self.prompt_len:-selectors.shape[-2], :].gather(dim = 2, index = indices)
+            k_past_compress = origin_key_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
+            v_past_compress = origin_value_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
 
             # print(origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].shape, "k_past_compress_shape")
 
-            k_cur = origin_key_states[:, :, -selectors.shape[-2]:, :]
-            v_cur = origin_value_states[:, :, -selectors.shape[-2]:, :]
+            k_cur = origin_key_states[:, :, -current_step_len:, :]
+            v_cur = origin_value_states[:, :, -current_step_len:, :]
 
         else:
             k_prompt = key_states[:, :, :self.prompt_len, :]
