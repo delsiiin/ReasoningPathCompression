@@ -1026,7 +1026,7 @@ def CausalLM_forward(
     # =============== Step-level Compression logic end =================
 
     # Calculate information entropy of logits over vocabulary
-    if "entropy" in self.config.mode:
+    if hasattr(self.config, 'mode') and "entropy" in self.config.mode:
         import torch.nn.functional as F
         
         # Apply softmax to get probabilities
@@ -1050,7 +1050,7 @@ def CausalLM_forward(
 
         torch.save(entropy, save_path)
 
-    if "confidence" in self.config.mode:
+    if hasattr(self.config, 'mode') and "confidence" in self.config.mode:
         import torch.nn.functional as F
         
         # Get top-k probabilities
