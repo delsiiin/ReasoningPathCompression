@@ -46,3 +46,9 @@ CUDA_VISIBLE_DEVICES=0 python example.py --mode induce_answer --observation_leng
 
 ## Generate Hit Rate
 ./run_plot_topk_indices.sh llama3 all 1537 256 true induced
+
+
+
+
+# Run Example New Method
+CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rpc True --rpc_mode ours_window_merge_rkv --rpc_budget_cot 256
