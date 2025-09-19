@@ -54,6 +54,60 @@ def calculate_entropy(attention_scores):
     entropy= entropy.to(dtype=torch.float32)
     return entropy
 
+def cal_similarity(
+    key_states,
+    threshold=0.5,
+    retain_ratio=0.2,
+    retain_direction="last",
+):
+    k = key_states[0]
+    num_heads = k.shape[0]
+
+    k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
+    similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2))
+
+    for h in range(num_heads):
+        similarity_cos[h].fill_diagonal_(0.0)
+
+    # shape: [num_heads, seq_len, seq_len]
+    similarity_mask = similarity_cos > threshold
+
+    seq_len = similarity_mask.size(-1)
+    k = int(seq_len * retain_ratio)
+
+    indices = torch.where(
+        similarity_mask,
+        torch.arange(similarity_mask.size(-1), device=similarity_mask.device),
+        torch.zeros_like(similarity_mask, dtype=torch.long),
+    )
+
+    # find the last True index in each row
+    if retain_direction == "last":
+        similarity_retain = torch.max(indices, dim=-1)[0]
+
+    # find the first True index in each row
+    elif retain_direction == "first":
+        similarity_retain = torch.min(indices, dim=-1)[0]
+
+    # keep the last_percent% elements
+    elif retain_direction == "last_percent":
+        similarity_retain = torch.topk(indices, k=k, dim=-1)[0][:, :, 0]
+
+    # keep the first_percent% elements
+    elif retain_direction == "first_percent":
+        similarity_retain = torch.topk(indices, k=k, dim=-1, largest=False)[0][:, :, -1]
+
+    # create indices for zeroing
+    batch_idx = (
+        torch.arange(num_heads).unsqueeze(1).repeat(1, similarity_retain.size(1))
+    )
+    seq_idx = torch.arange(similarity_retain.size(1)).unsqueeze(0).repeat(num_heads, 1)
+
+    # zero the specified positions in similarity_cos
+    similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
+
+    return similarity_cos.mean(dim=1).softmax(dim=-1)
+
 
 def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -86,65 +140,6 @@ class Qwen2RPCAttention(Qwen2Attention):
         self.col_sum_accu = None
 
         self.question_cache = None
-
-        self.step_lens = []
-        self.is_new_step = False
-
-    def cal_similarity(
-        self,
-        key_states,
-        threshold=0.5,
-        retain_ratio=0.2,
-        retain_direction="last",
-    ):
-        k = key_states[0]
-        num_heads = k.shape[0]
-
-        k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
-        similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2))
-
-        for h in range(num_heads):
-            similarity_cos[h].fill_diagonal_(0.0)
-
-        # shape: [num_heads, seq_len, seq_len]
-        similarity_mask = similarity_cos > threshold
-
-        seq_len = similarity_mask.size(-1)
-        k = int(seq_len * retain_ratio)
-
-        indices = torch.where(
-            similarity_mask,
-            torch.arange(similarity_mask.size(-1), device=similarity_mask.device),
-            torch.zeros_like(similarity_mask, dtype=torch.long),
-        )
-
-        # find the last True index in each row
-        if retain_direction == "last":
-            similarity_retain = torch.max(indices, dim=-1)[0]
-
-        # find the first True index in each row
-        elif retain_direction == "first":
-            similarity_retain = torch.min(indices, dim=-1)[0]
-
-        # keep the last_percent% elements
-        elif retain_direction == "last_percent":
-            similarity_retain = torch.topk(indices, k=k, dim=-1)[0][:, :, 0]
-
-        # keep the first_percent% elements
-        elif retain_direction == "first_percent":
-            similarity_retain = torch.topk(indices, k=k, dim=-1, largest=False)[0][:, :, -1]
-
-        # create indices for zeroing
-        batch_idx = (
-            torch.arange(num_heads).unsqueeze(1).repeat(1, similarity_retain.size(1))
-        )
-        seq_idx = torch.arange(similarity_retain.size(1)).unsqueeze(0).repeat(num_heads, 1)
-
-        # zero the specified positions in similarity_cos
-        similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
-
-        return similarity_cos.mean(dim=1).softmax(dim=-1)
-   
     
 
     def forward(
@@ -196,6 +191,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.question_cache = query_states
                 self.step_lens = []
                 self.is_new_step = False
+                self.current_step_len = 0
                 if hasattr(self, "_cot_done_printed"):
                     delattr(self, "_cot_done_printed")
     
@@ -226,12 +222,15 @@ class Qwen2RPCAttention(Qwen2Attention):
             attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
             attn_output = torch.matmul(attn_weights, value_states)
 
+            self.kv_cluster.cache_recent(query_states)
+            if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
+                self.kv_cluster.cached_recent = self.kv_cluster.cached_recent[:, :, -self.kv_cluster.R :, :]
+
             if not self.is_new_step:
-                self.kv_cluster.cache_recent(query_states)
+                self.current_step_len += 1
             else:
-                selectors = self.kv_cluster.cached_recent
-                self.kv_cluster.cached_recent = None
-                self.kv_cluster.cache_recent(query_states)
+                current_step_len = self.current_step_len
+                self.current_step_len = 0
                 self.is_new_step = False
 
             # cannot use 'past_key_value.get_seq_length'
@@ -260,7 +259,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                 key_states = restore_kv(key_states, self.num_key_value_groups)
                 value_states = restore_kv(value_states, self.num_key_value_groups)
                 
-                key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, selectors)
+                key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
 
                 self.step_lens = updated_step_lens
 
@@ -268,15 +267,16 @@ class Qwen2RPCAttention(Qwen2Attention):
 
                     # print(key_states_compress, "key_states_compress before second compression")
                     
-                    similarity_cos = self.cal_similarity(
-                        key_states_compress[..., self.kv_cluster.prompt_len:, :],
-                        retain_ratio=0.2,
-                        retain_direction="last",
-                    )[..., :-selectors.shape[-2]]
+                    similarity_cos = cal_similarity(
+                            key_states_compress,  # 包装成列表格式以匹配函数期望
+                            retain_ratio=0.2,
+                            retain_direction="last",
+                        )[..., :-current_step_len]
+
                     # print(similarity_cos.shape, "similarity_cos")
                     # 选择similarity_cos中最小的budget_cot个位置
-                    min_indices = torch.topk(similarity_cos, k=self.kv_cluster.budget_cot - selectors.shape[-2], dim=-1, largest=False).indices
-                    
+                    min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
+
                     # 对索引进行排序以保持原始顺序
                     min_indices_sorted = torch.sort(min_indices, dim=-1).values
                     # print(min_indices_sorted.shape, "min_indices_sorted")
@@ -287,7 +287,7 @@ class Qwen2RPCAttention(Qwen2Attention):
                     device = key_states_compress.device
                     seq_len = key_states_compress.size(-2)
                     num_heads = key_states_compress.size(1)
-                    recent_len = selectors.shape[-2]
+                    recent_len = current_step_len
                     
                     # 高效构建final_indices
                     final_indices = build_final_indices_optimized(
@@ -373,61 +373,6 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
 
         self.step_lens = []
         self.is_new_step = False
-
-    def cal_similarity(
-        self,
-        key_states,
-        threshold=0.5,
-        retain_ratio=0.2,
-        retain_direction="last",
-    ):
-        k = key_states[0]
-        num_heads = k.shape[0]
-
-        k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
-        similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2))
-
-        for h in range(num_heads):
-            similarity_cos[h].fill_diagonal_(0.0)
-
-        # shape: [num_heads, seq_len, seq_len]
-        similarity_mask = similarity_cos > threshold
-
-        seq_len = similarity_mask.size(-1)
-        k = int(seq_len * retain_ratio)
-
-        indices = torch.where(
-            similarity_mask,
-            torch.arange(similarity_mask.size(-1), device=similarity_mask.device),
-            torch.zeros_like(similarity_mask, dtype=torch.long),
-        )
-
-        # find the last True index in each row
-        if retain_direction == "last":
-            similarity_retain = torch.max(indices, dim=-1)[0]
-
-        # find the first True index in each row
-        elif retain_direction == "first":
-            similarity_retain = torch.min(indices, dim=-1)[0]
-
-        # keep the last_percent% elements
-        elif retain_direction == "last_percent":
-            similarity_retain = torch.topk(indices, k=k, dim=-1)[0][:, :, 0]
-
-        # keep the first_percent% elements
-        elif retain_direction == "first_percent":
-            similarity_retain = torch.topk(indices, k=k, dim=-1, largest=False)[0][:, :, -1]
-
-        # create indices for zeroing
-        batch_idx = (
-            torch.arange(num_heads).unsqueeze(1).repeat(1, similarity_retain.size(1))
-        )
-        seq_idx = torch.arange(similarity_retain.size(1)).unsqueeze(0).repeat(num_heads, 1)
-
-        # zero the specified positions in similarity_cos
-        similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
-
-        return similarity_cos.mean(dim=1).softmax(dim=-1)
    
 
     def forward(
@@ -475,6 +420,7 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
             self.question_cache = query_states
             self.step_lens = []
             self.is_new_step = False
+            self.current_step_len = 0
             if hasattr(self, "_cot_done_printed"):
                 delattr(self, "_cot_done_printed")
 
@@ -510,12 +456,15 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
 
             if q_len == 1:
 
+                self.kv_cluster.cache_recent(query_states)
+                if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
+                    self.kv_cluster.cached_recent = self.kv_cluster.cached_recent[:, :, -self.kv_cluster.R :, :]
+
                 if not self.is_new_step:
-                    self.kv_cluster.cache_recent(query_states)
+                    self.current_step_len += 1
                 else:
-                    selectors = self.kv_cluster.cached_recent
-                    self.kv_cluster.cached_recent = None
-                    self.kv_cluster.cache_recent(query_states)
+                    current_step_len = self.current_step_len
+                    self.current_step_len = 0
                     self.is_new_step = False
 
                 # cannot use 'past_key_value.get_seq_length'
@@ -523,7 +472,7 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
 
                 if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
 
-                    print(target_length, "target_length")
+                    # print(target_length, "target_length")
 
                     # if self.layer_idx == 5:
                     #     print(selectors.shape[-2], "selectors.shape")
@@ -541,7 +490,7 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
 
                     ques_attn_weights_sum = None
 
-                    key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, selectors)
+                    key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
 
                     self.step_lens = updated_step_lens
 
@@ -549,14 +498,15 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
 
                         # print(key_states_compress, "key_states_compress before second compression")
                         
-                        similarity_cos = self.cal_similarity(
-                            key_states_compress[..., self.kv_cluster.prompt_len:, :],
+                        similarity_cos = cal_similarity(
+                            key_states_compress,  # 包装成列表格式以匹配函数期望
                             retain_ratio=0.2,
                             retain_direction="last",
-                        )[..., :-selectors.shape[-2]]
+                        )[..., :-current_step_len]
+
                         # print(similarity_cos.shape, "similarity_cos")
                         # 选择similarity_cos中最小的budget_cot个位置
-                        min_indices = torch.topk(similarity_cos, k=self.kv_cluster.budget_cot - selectors.shape[-2], dim=-1, largest=False).indices
+                        min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
                         
                         # 对索引进行排序以保持原始顺序
                         min_indices_sorted = torch.sort(min_indices, dim=-1).values
@@ -568,7 +518,7 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
                         device = key_states_compress.device
                         seq_len = key_states_compress.size(-2)
                         num_heads = key_states_compress.size(1)
-                        recent_len = selectors.shape[-2]
+                        recent_len = current_step_len
                         
                         # 高效构建final_indices
                         final_indices = build_final_indices_optimized(
@@ -933,7 +883,7 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
         self.current_step_len += 1
         # self.step_confidences.append(neg_mean_topk_log_prob.item())
 
-        if self.is_newline and entropy >= 0.3 and not self.CoT_done and not self.early_exit and self.current_step_len >= self.model.layers[0].self_attn.kv_cluster.R:
+        if self.is_newline and not self.CoT_done and not self.early_exit and self.current_step_len >= self.model.layers[0].self_attn.kv_cluster.R:
             for layer in self.model.layers:
                 layer.self_attn.step_lens.append(self.current_step_len)
                 layer.self_attn.is_new_step = True
