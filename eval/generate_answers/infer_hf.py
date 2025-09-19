@@ -28,9 +28,28 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 
 from rkv.monkeypatch import replace_llama, replace_qwen2
 
-def gen_result_dp(data, total_tasks, top_k, rank, task, args):
+def gen_result(data, total_tasks, top_k, task, args, rank=None):
+    """
+    Unified function for both single-process and data-parallel inference.
     
-    device = torch.device(f'cuda:{rank}')
+    Args:
+        data: Input data to process
+        total_tasks: Total number of tasks
+        top_k: Top-k parameter for generation
+        task: Task type
+        args: Arguments object
+        rank: GPU rank for data parallel (None for single-process mode)
+    """
+    
+    # Set up device based on whether we're in data parallel mode
+    if rank is not None:
+        device = torch.device(f'cuda:{rank}')
+        device_map = None
+        use_auto_device = False
+    else:
+        device = None
+        device_map = "auto"
+        use_auto_device = True
 
     if args.rpc:
         enable_rpc(args.mode)
@@ -38,7 +57,7 @@ def gen_result_dp(data, total_tasks, top_k, rank, task, args):
     if args.mode == "rpc" or args.mode == "rkv" or args.mode is None:
         attn_implementation = 'flash_attention_2'
     else:
-        attn_implementation = 'eager'
+        attn_implementation = 'flash_attention_2' if rank is not None else 'eager'
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.padding_side = 'left'
@@ -53,8 +72,12 @@ def gen_result_dp(data, total_tasks, top_k, rank, task, args):
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
                 attn_implementation=attn_implementation,
-                config=config
-            ).to(device)
+                config=config,
+                device_map=device_map
+            )
+            if not use_auto_device:
+                model = model.to(device)
+            
             model.newline_token_ids = [
                 tokenizer.encode("\n")[-1],
                 tokenizer.encode(".\n")[-1],
@@ -76,8 +99,12 @@ def gen_result_dp(data, total_tasks, top_k, rank, task, args):
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
                 attn_implementation=attn_implementation,
-                config=config
-            ).to(device)
+                config=config,
+                device_map=device_map
+            )
+            if not use_auto_device:
+                model = model.to(device)
+            
             model.newline_token_ids = [
                 tokenizer.encode("\n")[-1],
                 tokenizer.encode(".\n")[-1],
@@ -132,181 +159,12 @@ def gen_result_dp(data, total_tasks, top_k, rank, task, args):
             args.model_path,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-            use_cache=True,
-            attn_implementation=attn_implementation,
-        ).to(device)
-        model.eval()
-
-        model.config.update(model_config)
-
-        if args.mode.lower() != "fullkv":
-            model.newline_token_ids = [
-                tokenizer.encode("\n")[-1],
-                tokenizer.encode(".\n")[-1],
-                tokenizer.encode(")\n")[-1],
-                tokenizer.encode("\n\n")[-1],
-                tokenizer.encode(".\n\n")[-1],
-                tokenizer.encode(")\n\n")[-1],
-            ]
-
-            model.after_think_token_ids = [
-                tokenizer.encode("</think>")[-1],
-            ]
-    
-
-    if args.rpc: 
-        set_rpc_config(model=model,
-                            P=args.P,
-                            R=args.R,
-                            c=args.c,
-                            selectors=args.selectors,
-                            aggregation=args.aggregation,
-                            kernel_size=args.kernel_size,
-                            pooling=args.pooling,
-                            budget_cot=args.budget_cot,
-                            buffer_cot=args.buffer_cot,
-                            budget_ans=args.budget_ans,
-                            cp_ratio=args.cp_ratio,
-                            mode=args.mode
-                            )
-
-    elif args.mode == "rkv":
-        print(f"RKV Cache Inference")
-    else:
-        print(f"Full KV Cache Inference")
-
-    for i in track(range(0, len(data), args.batch_size)):
-
-        batch_dicts = data[i : i + args.batch_size] 
-
-        processing = len(batch_dicts)
-        # print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
-        # print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
-        
-        batched_generate(
-            model=model,
-            tokenizer=tokenizer,
-            output_file=args.output_file,
-            batch_dicts=batch_dicts,
-            batch_size=args.batch_size,
-            max_new_tokens=32768,
-            temperature=0.6,
-            top_p=0.95,
-            top_k=top_k,
-            task=task
-        )
-
-        total_tasks -= processing
-
-def gen_result(data, total_tasks, top_k, task, args):
-    
-    if args.rpc:
-        enable_rpc(args.mode)
-
-    if args.mode == "rpc" or args.mode == "rkv" or args.mode is None:
-        attn_implementation = 'flash_attention_2'
-    else:
-        attn_implementation = 'eager'
-
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
-    tokenizer.padding_side = 'left'
-
-    if args.mode != "rkv":
-        if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
-            config = Qwen2Config.from_pretrained(args.model_path)
-            config.update({'mode':args.mode})
-            config.update({'divide_method':args.divide_method})
-            model = Qwen2ForCausalLM.from_pretrained(
-                args.model_path,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                attn_implementation=attn_implementation,
-                config=config,
-                device_map="auto"
-            )
-            model.newline_token_ids = [
-                tokenizer.encode("\n")[-1],
-                tokenizer.encode(".\n")[-1],
-                tokenizer.encode(")\n")[-1],
-                tokenizer.encode("\n\n")[-1],
-                tokenizer.encode(".\n\n")[-1],
-                tokenizer.encode(")\n\n")[-1],
-            ]
-
-            model.CoT_done_token_ids = [
-                tokenizer.encode("</think>")[-1],
-            ]
-        elif "llama" in args.model_path.lower():
-            config = LlamaConfig.from_pretrained(args.model_path)
-            config.update({'mode':args.mode})
-            config.update({'divide_method':args.divide_method})
-            model = LlamaForCausalLM.from_pretrained(
-                args.model_path,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                attn_implementation=attn_implementation,
-                config=config,
-                device_map="auto"
-            )
-            model.newline_token_ids = [
-                tokenizer.encode("\n")[-1],
-                tokenizer.encode(".\n")[-1],
-                tokenizer.encode(")\n")[-1],
-                tokenizer.encode("\n\n")[-1],
-                tokenizer.encode(".\n\n")[-1],
-                tokenizer.encode(")\n\n")[-1],
-            ]
-
-            model.CoT_done_token_ids = [
-                tokenizer.encode("</think>")[-1],
-            ]
-    else:
-
-        # ====== build compression config ======
-        compression_config = {
-            "method": args.mode,
-            "method_config": {
-                "budget": args.buffer_cot,
-                "window_size": 8,
-                "mix_lambda": 0.07,
-                "retain_ratio": 0.2,
-                "retain_direction": "last",
-                "first_tokens": 4,
-            },
-            "compression": None,
-            "update_kv": True
-        }
-        model_config = {
-            "divide_method": "step_length",
-            "divide_length": 128,
-            "compression_content": "think",
-        }
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model_path, use_fast=True, padding_side="left"
-        )
-
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-
-        # apply monkey patch
-        if args.mode.lower() != "fullkv":
-            if "llama" in args.model_path.lower():
-                replace_llama(compression_config)
-            elif "qwen" in args.model_path.lower():
-                replace_qwen2(compression_config)
-            else:
-                raise ValueError(f"Unsupported model: {args.model_path}")
-
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_path,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            device_map="auto",
+            device_map=device_map,
             use_cache=True,
             attn_implementation=attn_implementation,
         )
+        if not use_auto_device:
+            model = model.to(device)
         model.eval()
 
         model.config.update(model_config)
@@ -340,6 +198,7 @@ def gen_result(data, total_tasks, top_k, task, args):
                             cp_ratio=args.cp_ratio,
                             mode=args.mode
                             )
+
     elif args.mode == "rkv":
         print(f"RKV Cache Inference")
     else:
@@ -350,8 +209,10 @@ def gen_result(data, total_tasks, top_k, task, args):
         batch_dicts = data[i : i + args.batch_size] 
 
         processing = len(batch_dicts)
-        print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
-        print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
+        # Only print detailed logs in single-process mode
+        if rank is None:
+            print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
+            print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
         
         batched_generate(
             model=model,
@@ -366,7 +227,11 @@ def gen_result(data, total_tasks, top_k, task, args):
             task=task
         )
 
+        torch.cuda.empty_cache()
+
         total_tasks -= processing
+
+
 
 if __name__ == "__main__":
 
@@ -499,7 +364,7 @@ if __name__ == "__main__":
 
         processes = []
         for rank in range(world_size):
-            p = mp.Process(target=gen_result_dp, args=(data_subsets[rank], total_tasks, top_k, rank, task, args))
+            p = mp.Process(target=gen_result, args=(data_subsets[rank], total_tasks, top_k, task, args, rank))
 
             p.start()
 
