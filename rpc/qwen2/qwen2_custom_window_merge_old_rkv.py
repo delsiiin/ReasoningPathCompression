@@ -20,11 +20,6 @@ from transformers.utils import (
 )
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from rpc.rpc_utils_window_merge_old_rkv import init_rpc
-from rpc.step_lens_optimizer import (
-    update_step_lens_optimized,
-    build_final_indices_optimized,
-    efficient_gather_operation
-)
 
 import math
 import numpy as np
@@ -53,61 +48,6 @@ def calculate_entropy(attention_scores):
     entropy = -torch.sum(attention_scores * torch.log(attention_scores + 1e-10))  
     entropy= entropy.to(dtype=torch.float32)
     return entropy
-
-def cal_similarity(
-    key_states,
-    threshold=0.5,
-    retain_ratio=0.2,
-    retain_direction="last",
-):
-    k = key_states[0]
-    num_heads = k.shape[0]
-
-    k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
-    similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2))
-
-    for h in range(num_heads):
-        similarity_cos[h].fill_diagonal_(0.0)
-
-    # shape: [num_heads, seq_len, seq_len]
-    similarity_mask = similarity_cos > threshold
-
-    seq_len = similarity_mask.size(-1)
-    k = int(seq_len * retain_ratio)
-
-    indices = torch.where(
-        similarity_mask,
-        torch.arange(similarity_mask.size(-1), device=similarity_mask.device),
-        torch.zeros_like(similarity_mask, dtype=torch.long),
-    )
-
-    # find the last True index in each row
-    if retain_direction == "last":
-        similarity_retain = torch.max(indices, dim=-1)[0]
-
-    # find the first True index in each row
-    elif retain_direction == "first":
-        similarity_retain = torch.min(indices, dim=-1)[0]
-
-    # keep the last_percent% elements
-    elif retain_direction == "last_percent":
-        similarity_retain = torch.topk(indices, k=k, dim=-1)[0][:, :, 0]
-
-    # keep the first_percent% elements
-    elif retain_direction == "first_percent":
-        similarity_retain = torch.topk(indices, k=k, dim=-1, largest=False)[0][:, :, -1]
-
-    # create indices for zeroing
-    batch_idx = (
-        torch.arange(num_heads).unsqueeze(1).repeat(1, similarity_retain.size(1))
-    )
-    seq_idx = torch.arange(similarity_retain.size(1)).unsqueeze(0).repeat(num_heads, 1)
-
-    # zero the specified positions in similarity_cos
-    similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
-
-    return similarity_cos.mean(dim=1).softmax(dim=-1)
-
 
 def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -140,6 +80,9 @@ class Qwen2RPCAttention(Qwen2Attention):
         self.col_sum_accu = None
 
         self.question_cache = None
+
+        self.step_lens = []
+        self.is_new_step = False
     
 
     def forward(
@@ -194,6 +137,57 @@ class Qwen2RPCAttention(Qwen2Attention):
                 self.current_step_len = 0
                 if hasattr(self, "_cot_done_printed"):
                     delattr(self, "_cot_done_printed")
+
+            if q_len == 1:
+
+                self.kv_cluster.cache_recent(query_states)
+                if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
+                    self.kv_cluster.cached_recent = self.kv_cluster.cached_recent[:, :, -self.kv_cluster.R :, :]
+
+                if not self.is_new_step:
+                    self.current_step_len += 1
+                else:
+                    current_step_len = self.current_step_len
+                    self.current_step_len = 0
+                    self.is_new_step = False
+
+                # cannot use 'past_key_value.get_seq_length'
+                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len 
+
+                if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
+
+                    # print(target_length, "target_length")
+
+                    # if self.layer_idx == 5:
+                    #     print(selectors.shape[-2], "selectors.shape")
+                    
+                    # question = self.question_cache
+
+                    # bsz, num_heads, ques_len, head_dim = question.shape
+
+            
+                    # ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+                    # # no need to deal with attention mask
+
+                    # ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:], dim=-1, dtype=torch.float32).to(question.dtype)
+                    # ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
+
+                    ques_attn_weights_sum = None
+
+                    key_states_compress, value_states_compress, updated_step_lens = self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
+                    
+                    self.step_lens = updated_step_lens
+                    
+                    # replace with compressed cache
+                    past_key_value.key_cache[self.layer_idx] = key_states_compress
+                    past_key_value.value_cache[self.layer_idx] = value_states_compress
+                    
+                    self.kv_cluster.num_comp += 1
+            
+            else:
+
+                if self.layer_idx == 0:
+                    print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
     
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
@@ -204,135 +198,10 @@ class Qwen2RPCAttention(Qwen2Attention):
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        # if self.cache_mode == "vanilla":
-
-        #     if self.layer_idx == 0 and not hasattr(self, "_cot_done_printed"):
-        #         print("\033[33mCoT Done!!! Start Answering...\033[0m")
-        #         self._cot_done_printed = True
-
-        #     # upcast attention to fp32
-        #     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        #     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        #     attn_output = torch.matmul(attn_weights, value_states)
-
-        if q_len == 1:
-
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            attn_output = torch.matmul(attn_weights, value_states)
-
-            self.kv_cluster.cache_recent(query_states)
-            if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
-                self.kv_cluster.cached_recent = self.kv_cluster.cached_recent[:, :, -self.kv_cluster.R :, :]
-
-            if not self.is_new_step:
-                self.current_step_len += 1
-            else:
-                current_step_len = self.current_step_len
-                self.current_step_len = 0
-                self.is_new_step = False
-
-            # cannot use 'past_key_value.get_seq_length'
-            target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len 
-
-            if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
-
-                print(target_length, "target_length")
-
-                # if self.layer_idx == 5:
-                #     print(selectors.shape[-2], "selectors.shape")
-                
-                # question = self.question_cache
-
-                # bsz, num_heads, ques_len, head_dim = question.shape
-
-        
-                # ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-                # # no need to deal with attention mask
-
-                # ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:], dim=-1, dtype=torch.float32).to(question.dtype)
-                # ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
-
-                ques_attn_weights_sum = None
-
-                key_states = restore_kv(key_states, self.num_key_value_groups)
-                value_states = restore_kv(value_states, self.num_key_value_groups)
-                
-                key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
-
-                self.step_lens = updated_step_lens
-
-                if key_states_compress.size(-2) - self.kv_cluster.prompt_len > self.kv_cluster.budget_cot:
-
-                    # print(key_states_compress, "key_states_compress before second compression")
-                    
-                    similarity_cos = cal_similarity(
-                            key_states_compress,  # 包装成列表格式以匹配函数期望
-                            retain_ratio=0.2,
-                            retain_direction="last",
-                        )[..., :-current_step_len]
-
-                    # print(similarity_cos.shape, "similarity_cos")
-                    # 选择similarity_cos中最小的budget_cot个位置
-                    min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
-
-                    # 对索引进行排序以保持原始顺序
-                    min_indices_sorted = torch.sort(min_indices, dim=-1).values
-                    # print(min_indices_sorted.shape, "min_indices_sorted")
-
-
-                    
-                    # 使用优化的索引构建和gather操作
-                    device = key_states_compress.device
-                    seq_len = key_states_compress.size(-2)
-                    num_heads = key_states_compress.size(1)
-                    recent_len = current_step_len
-                    
-                    # 高效构建final_indices
-                    final_indices = build_final_indices_optimized(
-                        bsz, num_heads, self.kv_cluster.prompt_len,
-                        min_indices_sorted, seq_len, recent_len, device
-                    )
-                    
-                    # 高效进行gather操作
-                    key_states_compress, value_states_compress = efficient_gather_operation(
-                        key_states_compress, value_states_compress, final_indices
-                    )
-
-                    # print(key_states_compress.shape, "key_states_compress after second compression")
-                    
-                    # 高效更新step_lens - 使用优化的向量化实现
-                    # step_lens_start_time = time.time()
-                    if len(self.step_lens) > 0:
-                        self.step_lens = update_step_lens_optimized(
-                            self.step_lens, 
-                            min_indices_sorted[0], 
-                            min_indices_sorted.device
-                        )
-                        
-                        # step_lens_end_time = time.time()
-                        # step_lens_update_time = step_lens_end_time - step_lens_start_time
-                        # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
-                        #     print(f"Step_lens update time: {step_lens_update_time:.4f}s")
-
-                
-                # replace with compressed cache
-                past_key_value.key_cache[self.layer_idx] = key_states_compress
-                past_key_value.value_cache[self.layer_idx] = value_states_compress
-                
-                self.kv_cluster.num_comp += 1
-        
-        else:
-
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            attn_output = torch.matmul(attn_weights, value_states)
-
-            if self.layer_idx == 0:
-                print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
-
+        # upcast attention to fp32
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -490,63 +359,9 @@ class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
 
                     ques_attn_weights_sum = None
 
-                    key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
-
+                    key_states_compress, value_states_compress, updated_step_lens = self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
+                    
                     self.step_lens = updated_step_lens
-
-                    if key_states_compress.size(-2) - self.kv_cluster.prompt_len > self.kv_cluster.budget_cot:
-
-                        # print(key_states_compress, "key_states_compress before second compression")
-                        
-                        similarity_cos = cal_similarity(
-                            key_states_compress,  # 包装成列表格式以匹配函数期望
-                            retain_ratio=0.2,
-                            retain_direction="last",
-                        )[..., :-current_step_len]
-
-                        # print(similarity_cos.shape, "similarity_cos")
-                        # 选择similarity_cos中最小的budget_cot个位置
-                        min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
-                        
-                        # 对索引进行排序以保持原始顺序
-                        min_indices_sorted = torch.sort(min_indices, dim=-1).values
-                        # print(min_indices_sorted.shape, "min_indices_sorted")
-
-
-                        
-                        # 使用优化的索引构建和gather操作
-                        device = key_states_compress.device
-                        seq_len = key_states_compress.size(-2)
-                        num_heads = key_states_compress.size(1)
-                        recent_len = current_step_len
-                        
-                        # 高效构建final_indices
-                        final_indices = build_final_indices_optimized(
-                            bsz, num_heads, self.kv_cluster.prompt_len,
-                            min_indices_sorted, seq_len, recent_len, device
-                        )
-                        
-                        # 高效进行gather操作
-                        key_states_compress, value_states_compress = efficient_gather_operation(
-                            key_states_compress, value_states_compress, final_indices
-                        )
-
-                        # print(key_states_compress.shape, "key_states_compress after second compression")
-                        
-                        # 高效更新step_lens - 使用优化的向量化实现
-                        # step_lens_start_time = time.time()
-                        if len(self.step_lens) > 0:
-                            self.step_lens = update_step_lens_optimized(
-                                self.step_lens, 
-                                min_indices_sorted[0], 
-                                min_indices_sorted.device
-                            )
-                            
-                            # step_lens_end_time = time.time()
-                            # step_lens_update_time = step_lens_end_time - step_lens_start_time
-                            # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
-                            #     print(f"Step_lens update time: {step_lens_update_time:.4f}s")
-
                     
                     # replace with compressed cache
                     past_key_value.key_cache[self.layer_idx] = key_states_compress

@@ -162,23 +162,23 @@ class Qwen2RPCAttention(Qwen2Attention):
                     
                 if target_length > self.kv_cluster.buffer_cot - self.kv_cluster.R:
                     
-                    # self.kv_cluster.cache_recent(query_states)
+                    self.kv_cluster.cache_recent(query_states)
 
-                    partial_attn_weights = nn.functional.softmax(attn_weights[..., 0, self.kv_cluster.prompt_len:self.kv_cluster.prompt_len + self.kv_cluster.budget_cot + self.kv_cluster.buffer_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(query_states.dtype)
+                    # partial_attn_weights = nn.functional.softmax(attn_weights[..., 0, self.kv_cluster.prompt_len:self.kv_cluster.prompt_len + self.kv_cluster.budget_cot + self.kv_cluster.buffer_cot - self.kv_cluster.R], dim=-1, dtype=torch.float32).to(query_states.dtype)
 
-                    try:
-                        if self.col_sum_accu is None:
-                            self.col_sum_accu = partial_attn_weights
-                        else:
-                            prev_col_sum = self.col_sum_accu
-                            if prev_col_sum.shape[-1] != partial_attn_weights.shape[-1]:
-                                self.col_sum_accu = partial_attn_weights
-                                self.offset = self.R
-                            else:
-                                self.col_sum_accu = prev_col_sum + partial_attn_weights
-                    except Exception as e:
-                        print(f"Error when updating col_sum_accu, target_length={target_length}, {self.layer_budget_importance}")
-                        raise
+                    # try:
+                    #     if self.col_sum_accu is None:
+                    #         self.col_sum_accu = partial_attn_weights
+                    #     else:
+                    #         prev_col_sum = self.col_sum_accu
+                    #         if prev_col_sum.shape[-1] != partial_attn_weights.shape[-1]:
+                    #             self.col_sum_accu = partial_attn_weights
+                    #             self.offset = self.kv_cluster.R
+                    #         else:
+                    #             self.col_sum_accu = prev_col_sum + partial_attn_weights
+                    # except Exception as e:
+                    #     print(f"Error when updating col_sum_accu, target_length={target_length}, {self.layer_budget_importance}")
+                    #     raise
 
                 # upcast attention to fp32
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -213,15 +213,17 @@ class Qwen2RPCAttention(Qwen2Attention):
                     key_states = restore_kv(key_states, self.num_key_value_groups)
                     value_states = restore_kv(value_states, self.num_key_value_groups)
                     
-                    key_states_compress, value_states_compress= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups)
+                    key_states_compress, value_states_compress= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.num_key_value_groups)
 
-                    self.col_sum_accu = None
+                    # self.col_sum_accu = None
                     
                     # replace with compressed cache
                     past_key_value.key_cache[self.layer_idx] = key_states_compress
                     past_key_value.value_cache[self.layer_idx] = value_states_compress
                     
                     self.kv_cluster.num_comp += 1
+
+                    # print(f"\033[32mnum_comp: {self.kv_cluster.num_comp}, layer: {self.layer_idx}\033[0m")
 
                     if self.kv_cluster.cp_cot < self.kv_cluster.budget_cot:
                         self.kv_cluster.budget_cot = self.kv_cluster.cp_cot
@@ -427,7 +429,7 @@ class Qwen2RPCModel(Qwen2Model):
                     # decoder_layer.self_attn.cal_importance = False
                     decoder_layer.self_attn.layer_budget_importance = None
 
-            print(f"\033[32mLayer budgets: {layer_budgets}\033[0m")
+            # print(f"\033[32mLayer budgets: {layer_budgets}\033[0m")
 
             self.layer_budget_allocator = {f"layer_{i}": None for i in range(len(self.layers))}
 

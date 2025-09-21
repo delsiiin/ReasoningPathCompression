@@ -11,12 +11,6 @@ from flash_attn import flash_attn_func
 # perform qk calculation and get indices
 # this version will not update in inference mode
 
-from rpc.step_lens_optimizer import (
-    update_step_lens_optimized,
-    build_final_indices_optimized,
-    efficient_gather_operation
-)
-
 # Copied from transformers.models.llama.modeling_llama.repeat_kv for gqa_support
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -120,20 +114,20 @@ class RPCCluster():
 
     def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups, step_lens, current_step_len):
 
-        bsz, num_heads, q_len, head_dim = origin_key_states.shape
-
         # # support gqa
         key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
         value_states = repeat_kv(origin_value_states, self.num_key_value_groups)
 
         selectors = self.cached_recent
+        
+        bsz, num_heads, q_len, head_dim = selectors.shape
 
         # 记录注意力权重计算时间
         # attn_start_time = time.time()
         attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
         # no need to deal with attention mask
 
-        attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-current_step_len], dim=-1, dtype=torch.float32).to(selectors.dtype)
+        attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-self.R], dim=-1, dtype=torch.float32).to(selectors.dtype)
         # attn_end_time = time.time()
         # attn_time = attn_end_time - attn_start_time
         # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
@@ -141,7 +135,51 @@ class RPCCluster():
         
         # print(attn_weights.shape, "attn_weights_shape")
         col_sum_accu = attn_weights
+
+        # print(attn_weights_sum, 1111111111)
+            
+        # origin_row_sum_accu = row_sum_accu
+
+        # row_sum_accu = row_sum_accu[..., :-self.R]
         
+        # if self.aggregation == 'all':
+
+        #     row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, 1, row_sum_accu.shape[-1])
+        #     col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, 1, col_sum_accu.shape[-1])
+
+        #     if self.agg_func == 'max':
+        #         row_sum_accu = row_sum_accu.max(dim=1).values
+        #         col_sum_accu = col_sum_accu.max(dim=1).values
+        #     elif self.agg_func == 'mean':
+        #         row_sum_accu = row_sum_accu.mean(dim=1)
+        #         col_sum_accu = col_sum_accu.mean(dim=1)
+        #     else:
+        #         raise ValueError('agg_func not supported')
+        
+        # elif self.aggregation == 'group':
+
+        #     row_sum_accu = row_sum_accu.view(row_sum_accu.shape[0], -1, num_key_value_groups, row_sum_accu.shape[-1])
+        #     col_sum_accu = col_sum_accu.view(col_sum_accu.shape[0], -1, num_key_value_groups, col_sum_accu.shape[-1])
+
+        #     if self.agg_func == 'max':
+        #         row_sum_accu = row_sum_accu.max(dim=-2).values
+        #         col_sum_accu = col_sum_accu.max(dim=-2).values
+        #     elif self.agg_func == 'mean':
+        #         row_sum_accu = row_sum_accu.mean(dim=-2)
+        #         col_sum_accu = col_sum_accu.mean(dim=-2)
+        #     else:
+        #         raise ValueError('agg_func not supported')
+
+        # if self.pooling == 'avgpool':
+        #     row_attn_cache = F.avg_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        #     col_attn_cache = F.avg_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        # elif self.pooling == 'maxpool':
+        #     row_attn_cache = F.max_pool1d(row_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        #     col_attn_cache = F.max_pool1d(col_sum_accu, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
+        # else:
+        #     raise ValueError('Pooling method not supported')
+
+        alpha = 0.9
         row_col_sum = col_sum_accu.mean(dim=1) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
         # print(row_col_sum.shape, "row_col_sum")
         
@@ -205,167 +243,30 @@ class RPCCluster():
             # if self.layer_idx == 0:
             #     print(selected_indices, "selected_indices")
             
-            if selected_indices[0].shape[-1] <= self.budget_cot:
-
-                # 直接对selected_indices进行维度扩展，用于gather操作
-                # 将每个batch的索引扩展到 (num_heads, seq_len, head_dim) 的形状
-                indices = []
-                for idx_list in selected_indices:
-                    # 扩展维度: (seq_len,) -> (num_heads, seq_len, head_dim)
-                    expanded_idx = idx_list.unsqueeze(0).unsqueeze(-1).expand(
-                        origin_key_states.size(1), -1, origin_key_states.size(-1)
-                    )
-                    indices.append(expanded_idx)
-                indices = torch.stack(indices, dim=0)  # 堆叠成 (batch_size, num_heads, seq_len, head_dim)
-                # print(indices.shape, "final_indices_shape")
-                
-                # end_time = time.time()
-                # compression_time = end_time - start_time
-                # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
-                #     print(f"Step compression time: {compression_time:.4f}s")
-
-            else:
-                # 当候选 token 超过预算：
-                # 1) 在 col_sum_accu 中排除 selected_indices 对应元素
-                # 2) 从剩余元素中选取 topk，k = self.budget_cot - current_step_len
-                # 3) 依据选出的 token 构造 gather 所需的 indices
-
-                # 计算每个历史 token 的分数：此处保留 head 维度，稍后再做聚合
-                # token_scores 形状: (bsz, n_head, L)
-                token_scores = col_sum_accu.sum(dim = -2)
-
-                bsz, n_head, L = token_scores.shape
-                device = token_scores.device
-                dtype = token_scores.dtype
-
-                if self.aggregation == 'all':
-
-                    token_scores = token_scores.view(token_scores.shape[0], -1, 1, token_scores.shape[-1])
-
-                    if self.agg_func == 'max':
-                        token_scores = token_scores.max(dim=1).values
-                    elif self.agg_func == 'mean':
-                        token_scores = token_scores.mean(dim=1)
-                    else:
-                        raise ValueError('agg_func not supported')
-                
-                elif self.aggregation == 'group':
-
-                    token_scores = token_scores.view(token_scores.shape[0], -1, num_key_value_groups, token_scores.shape[-1])
-
-                    if self.agg_func == 'max':
-                        token_scores = token_scores.max(dim=-2).values
-                    elif self.agg_func == 'mean':
-                        token_scores = token_scores.mean(dim=-2)
-                    else:
-                        raise ValueError('agg_func not supported')
-
-                if self.pooling == 'avgpool':
-                    token_scores = F.avg_pool1d(token_scores, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-                elif self.pooling == 'maxpool':
-                    token_scores = F.max_pool1d(token_scores, kernel_size = self.kernel_size, padding=self.kernel_size//2, stride=1)
-                else:
-                    raise ValueError('Pooling method not supported')
-
-                # 预算中留给历史 token 的数量
-                remaining_k = max(int(self.budget_cot - current_step_len), 0)
-                remaining_k = min(remaining_k, L)  # 不超过可选长度
-
-                indices_list = []
-                # 对 batch 中每个样本独立计算
-                for b in range(bsz):
-                    # 构造屏蔽 mask: True 表示可选，False 表示需要排除
-                    mask = torch.ones(L, dtype=torch.bool, device=device)
-                    # 排除已选 step 的 token（这些是相对 self.prompt_len:-self.R 窗口的索引）
-                    mask[selected_indices[b]] = True
-
-                    # 若没有预算或没有可选元素，则构造空 indices
-                    if remaining_k == 0 or mask.sum().item() == 0:
-                        selected_tok_idx = torch.empty(0, dtype=torch.long, device=device)
-                    else:
-                        # 将被排除位置的分数置为 -inf，确保不会被 topk 选中
-                        # token_scores[b] 形状: (n_head, L)，按最后一维进行屏蔽
-                        masked_scores = token_scores[b].clone()  # (n_head, L)
-                        masked_scores[:, ~mask] = float('-inf')
-
-                        # # 在 head 维上做聚合以得到 1D 的 token 分数（可选 mean 或 max，这里使用 max 更保守）
-                        # combined_scores = masked_scores.max(dim=0).values  # (L,)
-
-                        # 处理可选数量不足的情况：只取可选数量与 remaining_k 的较小值
-                        k_eff = min(remaining_k, int(mask.sum().item()))
-                        topk_idx = torch.topk(masked_scores, k=k_eff, dim=-1, largest=True).indices  # (k_eff,)
-                        # 排序以保持时间顺序
-                        selected_tok_idx = torch.sort(topk_idx).values
-
-                    indices_list.append(selected_tok_idx)
-
-                # 高效更新step_lens - 使用优化的向量化实现
-                # step_lens_start_time = time.time()
-                if len(step_lens) > 0:
-                    step_lens = update_step_lens_optimized(
-                        step_lens, 
-                        selected_tok_idx[0], 
-                        selected_tok_idx.device
-                    )
-                    
-                    # step_lens_end_time = time.time()
-                    # step_lens_update_time = step_lens_end_time - step_lens_start_time
-                    # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
-                    #     print(f"Step_lens update time: {step_lens_update_time:.4f}s")
-
-                # 堆叠为 (bsz, num_heads, k_effm)
-                indices = torch.stack(indices_list, dim=0)
-
-                # Merging
-                target_key_states = origin_key_states[:, :, self.prompt_len:-current_step_len, :]
-                target_value_states = origin_value_states[:, :, self.prompt_len:-current_step_len, :]
-
-                mask = torch.zeros(target_key_states.shape[:-1], dtype=torch.bool).to(target_key_states.device)
-                mask = mask.scatter(-1, indices, 1)
-
-                k_hh_recent = target_key_states[mask].view(bsz, num_heads, -1, head_dim)
-                v_hh_recent = target_value_states[mask].view(bsz, num_heads, -1, head_dim)
-                
-                # applying merge here
-                # breakpoint()
-                k_hh_pruned = target_key_states[~mask].view(bsz, num_heads, -1, head_dim)
-                v_hh_pruned = target_value_states[~mask].view(bsz, num_heads, -1, head_dim)
-                # similarity = k_hh_pruned @ k_hh_recent.transpose(-1, -2) # dot product
-                similarity = (k_hh_pruned / torch.norm(k_hh_pruned, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)) @ ((k_hh_recent / (torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim))).transpose(-1, -2)) # cosin
-                max_values, max_indices = similarity.max(dim=-1)
-                # breakpoint()   
-                if self.threshold == None:
-                    self.threshold = max_values.mean()
-                else:
-                    # self.threshold = (self.threshold + max_values.mean()) / 2
-                    # breakpoint()
-                    self.threshold = 0.3 * self.threshold + 0.7 * max_values.mean()  # 0.3 0.7
-                filter_indices = (max_values.mean(1)>=self.threshold).squeeze(0)
-                merged_indices = max_indices[..., filter_indices].unsqueeze(-1).repeat(1, 1, 1, head_dim)
-                merge_weights = max_values[..., filter_indices].unsqueeze(-1).repeat(1, 1, 1, head_dim)
-
-                k_hh_merged = k_hh_pruned[..., filter_indices, :]
-                k_hh_recent = torch.scatter_reduce(input=k_hh_recent, dim=2, index=merged_indices, src=merge_weights*k_hh_merged, reduce='mean', include_self=True)
+            # 直接对selected_indices进行维度扩展，用于gather操作
+            # 将每个batch的索引扩展到 (num_heads, seq_len, head_dim) 的形状
+            indices = []
+            for idx_list in selected_indices:
+                # 扩展维度: (seq_len,) -> (num_heads, seq_len, head_dim)
+                expanded_idx = idx_list.unsqueeze(0).unsqueeze(-1).expand(
+                    origin_key_states.size(1), -1, origin_key_states.size(-1)
+                )
+                indices.append(expanded_idx)
+            indices = torch.stack(indices, dim=0)  # 堆叠成 (batch_size, num_heads, seq_len, head_dim)
+            # print(indices.shape, "final_indices_shape")
             
-                v_hh_merged = v_hh_pruned[..., filter_indices, :]
-                v_hh_recent = torch.scatter_reduce(input=v_hh_recent, dim=2, index=merged_indices, src=merge_weights*v_hh_merged, reduce='mean', include_self=True)
-        
-
+            # end_time = time.time()
+            # compression_time = end_time - start_time
+            # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
+            #     print(f"Step compression time: {compression_time:.4f}s")
         
         # support gqa
         if self.aggregation == 'all' or 'group':
             k_prompt = origin_key_states[:, :, :self.prompt_len, :]
             v_prompt = origin_value_states[:, :, :self.prompt_len, :]
-
-            if selected_indices[0].shape[-1] <= self.budget_cot:
         
-                k_past_compress = origin_key_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
-                v_past_compress = origin_value_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
-
-            else:
-            
-                k_past_compress = k_hh_recent
-                v_past_compress = v_hh_recent
+            k_past_compress = origin_key_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
+            v_past_compress = origin_value_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
 
             # print(origin_key_states[:, :, self.prompt_len:-selectors.shape[-2], :].shape, "k_past_compress_shape")
 

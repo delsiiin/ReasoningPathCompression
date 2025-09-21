@@ -3,15 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
 import warnings
+import time
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from .llama_vanilla import (
+from .qwen2_vanilla import (
     apply_rotary_pos_emb,
     repeat_kv,
-    LlamaAttention,
-    LlamaFlashAttention2,
-    LlamaModel,
-    LlamaForCausalLM,
+    Qwen2Attention,
+    Qwen2FlashAttention2,
+    Qwen2Model,
+    Qwen2ForCausalLM,
     _prepare_4d_causal_attention_mask_with_cache_position
 )
 from transformers.utils import (
@@ -19,8 +20,14 @@ from transformers.utils import (
 )
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from rpc.rpc_utils_window_merge_old_rkv import init_rpc
+from rpc.step_lens_optimizer import (
+    update_step_lens_optimized,
+    build_final_indices_optimized,
+    efficient_gather_operation
+)
 
 import math
+import numpy as np
 
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
@@ -41,6 +48,67 @@ from transformers.utils import (
 
 logger = logging.get_logger(__name__)
 
+def calculate_entropy(attention_scores):
+    attention_scores = attention_scores.to(torch.float32)
+    entropy = -torch.sum(attention_scores * torch.log(attention_scores + 1e-10))  
+    entropy= entropy.to(dtype=torch.float32)
+    return entropy
+
+def cal_similarity(
+    key_states,
+    threshold=0.5,
+    retain_ratio=0.2,
+    retain_direction="last",
+):
+    k = key_states[0]
+    num_heads = k.shape[0]
+
+    k_norm = k / (k.norm(dim=-1, keepdim=True) + 1e-8)
+    similarity_cos = torch.matmul(k_norm, k_norm.transpose(-1, -2))
+
+    for h in range(num_heads):
+        similarity_cos[h].fill_diagonal_(0.0)
+
+    # shape: [num_heads, seq_len, seq_len]
+    similarity_mask = similarity_cos > threshold
+
+    seq_len = similarity_mask.size(-1)
+    k = int(seq_len * retain_ratio)
+
+    indices = torch.where(
+        similarity_mask,
+        torch.arange(similarity_mask.size(-1), device=similarity_mask.device),
+        torch.zeros_like(similarity_mask, dtype=torch.long),
+    )
+
+    # find the last True index in each row
+    if retain_direction == "last":
+        similarity_retain = torch.max(indices, dim=-1)[0]
+
+    # find the first True index in each row
+    elif retain_direction == "first":
+        similarity_retain = torch.min(indices, dim=-1)[0]
+
+    # keep the last_percent% elements
+    elif retain_direction == "last_percent":
+        similarity_retain = torch.topk(indices, k=k, dim=-1)[0][:, :, 0]
+
+    # keep the first_percent% elements
+    elif retain_direction == "first_percent":
+        similarity_retain = torch.topk(indices, k=k, dim=-1, largest=False)[0][:, :, -1]
+
+    # create indices for zeroing
+    batch_idx = (
+        torch.arange(num_heads).unsqueeze(1).repeat(1, similarity_retain.size(1))
+    )
+    seq_idx = torch.arange(similarity_retain.size(1)).unsqueeze(0).repeat(num_heads, 1)
+
+    # zero the specified positions in similarity_cos
+    similarity_cos[batch_idx, seq_idx, similarity_retain] = 0
+
+    return similarity_cos.mean(dim=1).softmax(dim=-1)
+
+
 def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
     将 (batch, num_attention_heads, seqlen, head_dim) 的张量还原为 
@@ -53,7 +121,11 @@ def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     num_key_value_heads = num_attention_heads // n_rep
     return hidden_states.view(batch, num_key_value_heads, n_rep, seqlen, head_dim)[:, :, 0, :, :]
 
-class LlamaRPCAttention(LlamaAttention):
+class Qwen2RPCAttention(Qwen2Attention):
+    """
+    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
+    and "Generating Long Sequences with Sparse Transformers".
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -68,9 +140,7 @@ class LlamaRPCAttention(LlamaAttention):
         self.col_sum_accu = None
 
         self.question_cache = None
-
-        self.step_lens = []
-        self.is_new_step = False
+    
 
     def forward(
         self,
@@ -82,36 +152,17 @@ class LlamaRPCAttention(LlamaAttention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-            query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-            )
-            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-            value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
-
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-            query_states = torch.cat(query_states, dim=-1)
-
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-            key_states = torch.cat(key_states, dim=-1)
-
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-            value_states = torch.cat(value_states, dim=-1)
-
-        else:
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
+       
         if position_embeddings is None:
             logger.warning_once(
                 "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
@@ -123,10 +174,9 @@ class LlamaRPCAttention(LlamaAttention):
         else:
             cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
+        
         if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
             if q_len != 1:
@@ -144,70 +194,145 @@ class LlamaRPCAttention(LlamaAttention):
                 self.current_step_len = 0
                 if hasattr(self, "_cot_done_printed"):
                     delattr(self, "_cot_done_printed")
-
-            if q_len == 1:
-
-                self.kv_cluster.cache_recent(query_states)
-                if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
-                    self.kv_cluster.cached_recent = self.kv_cluster.cached_recent[:, :, -self.kv_cluster.R :, :]
-
-                if not self.is_new_step:
-                    self.current_step_len += 1
-                else:
-                    current_step_len = self.current_step_len
-                    self.current_step_len = 0
-                    self.is_new_step = False
-
-                # cannot use 'past_key_value.get_seq_length'
-                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len 
-
-                if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
-
-                    # print(target_length, "target_length")
-
-                    # if self.layer_idx == 5:
-                    #     print(selectors.shape[-2], "selectors.shape")
-                    
-                    # question = self.question_cache
-
-                    # bsz, num_heads, ques_len, head_dim = question.shape
-
-            
-                    # ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-                    # # no need to deal with attention mask
-
-                    # ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:], dim=-1, dtype=torch.float32).to(question.dtype)
-                    # ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
-
-                    ques_attn_weights_sum = None
-
-                    key_states_compress, value_states_compress, updated_step_lens = self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
-                    
-                    self.step_lens = updated_step_lens
-                    
-                    # replace with compressed cache
-                    past_key_value.key_cache[self.layer_idx] = key_states_compress
-                    past_key_value.value_cache[self.layer_idx] = value_states_compress
-                    
-                    self.kv_cluster.num_comp += 1
-            
-            else:
-
-                if self.layer_idx == 0:
-                    print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
-
+    
+        # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
+        # if self.cache_mode == "vanilla":
+
+        #     if self.layer_idx == 0 and not hasattr(self, "_cot_done_printed"):
+        #         print("\033[33mCoT Done!!! Start Answering...\033[0m")
+        #         self._cot_done_printed = True
+
+        #     # upcast attention to fp32
+        #     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        #     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        #     attn_output = torch.matmul(attn_weights, value_states)
+
+        if q_len == 1:
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            self.kv_cluster.cache_recent(query_states)
+            if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
+                self.kv_cluster.cached_recent = self.kv_cluster.cached_recent[:, :, -self.kv_cluster.R :, :]
+
+            if not self.is_new_step:
+                self.current_step_len += 1
+            else:
+                current_step_len = self.current_step_len
+                self.current_step_len = 0
+                self.is_new_step = False
+
+            # cannot use 'past_key_value.get_seq_length'
+            target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len 
+
+            if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
+
+                print(target_length, "target_length")
+
+                # if self.layer_idx == 5:
+                #     print(selectors.shape[-2], "selectors.shape")
+                
+                # question = self.question_cache
+
+                # bsz, num_heads, ques_len, head_dim = question.shape
+
+        
+                # ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+                # # no need to deal with attention mask
+
+                # ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:], dim=-1, dtype=torch.float32).to(question.dtype)
+                # ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
+
+                ques_attn_weights_sum = None
+
+                key_states = restore_kv(key_states, self.num_key_value_groups)
+                value_states = restore_kv(value_states, self.num_key_value_groups)
+                
+                key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
+
+                self.step_lens = updated_step_lens
+
+                if key_states_compress.size(-2) - self.kv_cluster.prompt_len > self.kv_cluster.budget_cot:
+
+                    # print(key_states_compress, "key_states_compress before second compression")
+                    
+                    similarity_cos = cal_similarity(
+                            key_states_compress,  # 包装成列表格式以匹配函数期望
+                            retain_ratio=0.2,
+                            retain_direction="last",
+                        )[..., :-current_step_len]
+
+                    # print(similarity_cos.shape, "similarity_cos")
+                    # 选择similarity_cos中最小的budget_cot个位置
+                    min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
+
+                    # 对索引进行排序以保持原始顺序
+                    min_indices_sorted = torch.sort(min_indices, dim=-1).values
+                    # print(min_indices_sorted.shape, "min_indices_sorted")
+
+
+                    
+                    # 使用优化的索引构建和gather操作
+                    device = key_states_compress.device
+                    seq_len = key_states_compress.size(-2)
+                    num_heads = key_states_compress.size(1)
+                    recent_len = current_step_len
+                    
+                    # 高效构建final_indices
+                    final_indices = build_final_indices_optimized(
+                        bsz, num_heads, self.kv_cluster.prompt_len,
+                        min_indices_sorted, seq_len, recent_len, device
+                    )
+                    
+                    # 高效进行gather操作
+                    key_states_compress, value_states_compress = efficient_gather_operation(
+                        key_states_compress, value_states_compress, final_indices
+                    )
+
+                    # print(key_states_compress.shape, "key_states_compress after second compression")
+                    
+                    # 高效更新step_lens - 使用优化的向量化实现
+                    # step_lens_start_time = time.time()
+                    if len(self.step_lens) > 0:
+                        self.step_lens = update_step_lens_optimized(
+                            self.step_lens, 
+                            min_indices_sorted[0], 
+                            min_indices_sorted.device
+                        )
+                        
+                        # step_lens_end_time = time.time()
+                        # step_lens_update_time = step_lens_end_time - step_lens_start_time
+                        # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
+                        #     print(f"Step_lens update time: {step_lens_update_time:.4f}s")
+
+                
+                # replace with compressed cache
+                past_key_value.key_cache[self.layer_idx] = key_states_compress
+                past_key_value.value_cache[self.layer_idx] = value_states_compress
+                
+                self.kv_cluster.num_comp += 1
+        
+        else:
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+            attn_output = torch.matmul(attn_weights, value_states)
+
+            if self.layer_idx == 0:
+                print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
+
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -216,15 +341,9 @@ class LlamaRPCAttention(LlamaAttention):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        else:
-            attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
@@ -232,13 +351,12 @@ class LlamaRPCAttention(LlamaAttention):
         return attn_output, attn_weights, past_key_value
     
 
-class LlamaRPCFlashAttention(LlamaFlashAttention2):
+class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
     """
-    Llama flash attention module. This module inherits from `LlamaAttention` as the weights of the module stays
-    untouched. The only required change would be on the forward pass where it needs to correctly call the public API of
-    flash attention and deal with padding tokens in case the input contains any of them.
+    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
+    and "Generating Long Sequences with Sparse Transformers".
     """
-     
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         init_rpc(self)
@@ -255,35 +373,25 @@ class LlamaRPCFlashAttention(LlamaFlashAttention2):
 
         self.step_lens = []
         self.is_new_step = False
+   
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        if isinstance(past_key_value, StaticCache):
-            raise ValueError(
-                "`static` cache implementation is not compatible with `attn_implementation==flash_attention_2` "
-                "make sure to use `sdpa` in the mean time, and open an issue at https://github.com/huggingface/transformers"
-            )
-
-        output_attentions = False
-
+    ):
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        # Flash attention requires the input to have the shape
-        # batch_size x seq_length x head_dim x hidden_dim
-        # therefore we just need to keep the original shape
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -317,8 +425,33 @@ class LlamaRPCFlashAttention(LlamaFlashAttention2):
                 delattr(self, "_cot_done_printed")
 
         if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            # Activate slicing cache only if the config has a value `sliding_windows` attribute
+            cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
+            kv_seq_len = key_states.shape[-2] + cache_position[0]
+            if (
+                getattr(self.config, "sliding_window", None) is not None
+                and kv_seq_len > self.config.sliding_window
+                and cache_has_contents
+            ):
+                slicing_tokens = 1 - self.config.sliding_window
+
+                past_key = past_key_value[self.layer_idx][0]
+                past_value = past_key_value[self.layer_idx][1]
+
+                past_key = past_key[:, :, slicing_tokens:, :].contiguous()
+                past_value = past_value[:, :, slicing_tokens:, :].contiguous()
+
+                if past_key.shape[-2] != self.config.sliding_window - 1:
+                    raise ValueError(
+                        f"past key must have a shape of (`batch_size, num_heads, self.config.sliding_window-1, head_dim`), got"
+                        f" {past_key.shape}"
+                    )
+
+                if attention_mask is not None:
+                    attention_mask = attention_mask[:, slicing_tokens:]
+                    attention_mask = torch.cat([attention_mask, torch.ones_like(attention_mask[:, -1:])], dim=-1)
+
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
             if q_len == 1:
@@ -357,9 +490,63 @@ class LlamaRPCFlashAttention(LlamaFlashAttention2):
 
                     ques_attn_weights_sum = None
 
-                    key_states_compress, value_states_compress, updated_step_lens = self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
-                    
+                    key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
+
                     self.step_lens = updated_step_lens
+
+                    if key_states_compress.size(-2) - self.kv_cluster.prompt_len > self.kv_cluster.budget_cot:
+
+                        # print(key_states_compress, "key_states_compress before second compression")
+                        
+                        similarity_cos = cal_similarity(
+                            key_states_compress,  # 包装成列表格式以匹配函数期望
+                            retain_ratio=0.2,
+                            retain_direction="last",
+                        )[..., :-current_step_len]
+
+                        # print(similarity_cos.shape, "similarity_cos")
+                        # 选择similarity_cos中最小的budget_cot个位置
+                        min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
+                        
+                        # 对索引进行排序以保持原始顺序
+                        min_indices_sorted = torch.sort(min_indices, dim=-1).values
+                        # print(min_indices_sorted.shape, "min_indices_sorted")
+
+
+                        
+                        # 使用优化的索引构建和gather操作
+                        device = key_states_compress.device
+                        seq_len = key_states_compress.size(-2)
+                        num_heads = key_states_compress.size(1)
+                        recent_len = current_step_len
+                        
+                        # 高效构建final_indices
+                        final_indices = build_final_indices_optimized(
+                            bsz, num_heads, self.kv_cluster.prompt_len,
+                            min_indices_sorted, seq_len, recent_len, device
+                        )
+                        
+                        # 高效进行gather操作
+                        key_states_compress, value_states_compress = efficient_gather_operation(
+                            key_states_compress, value_states_compress, final_indices
+                        )
+
+                        # print(key_states_compress.shape, "key_states_compress after second compression")
+                        
+                        # 高效更新step_lens - 使用优化的向量化实现
+                        # step_lens_start_time = time.time()
+                        if len(self.step_lens) > 0:
+                            self.step_lens = update_step_lens_optimized(
+                                self.step_lens, 
+                                min_indices_sorted[0], 
+                                min_indices_sorted.device
+                            )
+                            
+                            # step_lens_end_time = time.time()
+                            # step_lens_update_time = step_lens_end_time - step_lens_start_time
+                            # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
+                            #     print(f"Step_lens update time: {step_lens_update_time:.4f}s")
+
                     
                     # replace with compressed cache
                     past_key_value.key_cache[self.layer_idx] = key_states_compress
@@ -372,20 +559,14 @@ class LlamaRPCFlashAttention(LlamaFlashAttention2):
                 if self.layer_idx == 0:
                     print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
 
-        # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
-        # to be able to avoid many of these transpose/reshape/view.
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        dropout_rate = self.attention_dropout if self.training else 0.0
+        # repeat k/v heads if n_kv_heads < n_heads
+        # key_states = repeat_kv(key_states, self.num_key_value_groups)
+        # value_states = repeat_kv(value_states, self.num_key_value_groups)
+        dropout_rate = 0.0 if not self.training else self.attention_dropout
 
         # In PEFT, usually we cast the layer norms in float32 for training stability reasons
         # therefore the input hidden states gets silently casted in float32. Hence, we need
-        # cast them back in the correct dtype just to be sure everything works as expected.
-        # This might slowdown training & inference so it is recommended to not cast the LayerNorms
-        # in fp32. (LlamaRMSNorm handles it correctly)
-
+        # cast them back in float16 just to be sure everything works as expected.
         input_dtype = query_states.dtype
         if input_dtype == torch.float32:
             if torch.is_autocast_enabled():
@@ -406,6 +587,20 @@ class LlamaRPCFlashAttention(LlamaFlashAttention2):
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
+        # Reashape to the expected shape for Flash Attention
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
+        if (
+            self.config.use_sliding_window
+            and getattr(self.config, "sliding_window", None) is not None
+            and self.layer_idx >= self.config.max_window_layers
+        ):
+            sliding_window = self.config.sliding_window
+        else:
+            sliding_window = None
+
         attn_output = _flash_attention_forward(
             query_states,
             key_states,
@@ -414,20 +609,21 @@ class LlamaRPCFlashAttention(LlamaFlashAttention2):
             q_len,
             position_ids=position_ids,
             dropout=dropout_rate,
-            sliding_window=getattr(self, "sliding_window", None),
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
+            sliding_window=sliding_window,
             is_causal=self.is_causal,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
 
-        attn_output = attn_output.reshape(bsz, q_len, -1).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+    
 
-class LlamaRPCModel(LlamaModel):
+class Qwen2RPCModel(Qwen2Model):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2DecoderLayer`]
 
@@ -510,9 +706,6 @@ class LlamaRPCModel(LlamaModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        if self.config.mode == "dynamic_layer_budget":
-            layer_budget_allocator = []
-
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -541,9 +734,6 @@ class LlamaRPCModel(LlamaModel):
                     position_embeddings=position_embeddings,
                 )
 
-            if hidden_states.shape[-2] > 1 and self.config.mode == "dynamic_layer_budget":
-                layer_budget_allocator.append(decoder_layer.self_attn.layer_budget_importance)
-
             hidden_states = layer_outputs[0]
 
             if use_cache:
@@ -554,20 +744,6 @@ class LlamaRPCModel(LlamaModel):
 
         hidden_states = self.norm(hidden_states)
 
-        if hidden_states.shape[-2] > 1 and self.config.mode == "dynamic_layer_budget":
-
-            layer_budget_allocator = torch.stack(layer_budget_allocator)
-
-            weights = torch.softmax(-layer_budget_allocator, dim=0)
-
-            layer_budgets = weights
-
-            layer_budgets = torch.clamp(layer_budgets, min=0.01, max=1.0)
-
-            for idx, decoder_layer in enumerate(self.layers):
-                decoder_layer.self_attn.kv_cluster.cp_ratio = layer_budgets[idx]
-                decoder_layer.self_attn.kv_cluster.cp_cot = layer_budgets[idx] * decoder_layer.self_attn.kv_cluster.budget_cot
-                decoder_layer.self_attn.kv_cluster.cp_ans = layer_budgets[idx] * decoder_layer.self_attn.kv_cluster.budget_ans
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -586,10 +762,12 @@ class LlamaRPCModel(LlamaModel):
             attentions=all_self_attns,
         )
     
-class LlamaRPCForCausalLM(LlamaForCausalLM):
+
+class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
     
     def forward(
         self,
@@ -682,6 +860,26 @@ class LlamaRPCForCausalLM(LlamaForCausalLM):
                 predicted_token_ids[0].cpu().item() in self.CoT_done_token_ids
             )
 
+        # Apply softmax to get probabilities
+        probs = F.softmax(logits, dim=-1)
+        
+        # Calculate entropy: H = -sum(p * log(p))
+        # Add small epsilon to avoid log(0)
+        epsilon = 1e-8
+        log_probs = torch.log(probs + epsilon)
+        entropy = -torch.sum(probs * log_probs, dim=-1)
+
+        # # Get top-k probabilities
+        # k = getattr(self.config, 'topk_size', 20)  # Default to top-20 if not specified
+        # # Get top-k probabilities
+        # topk_probs, _ = torch.topk(probs, k, dim=-1)
+        # # Calculate log of top-k probabilities and negative mean
+        # epsilon = 1e-8  # Avoid log(0)
+        # topk_log_probs = torch.log(topk_probs + epsilon)
+        # neg_mean_topk_log_prob = -torch.mean(topk_log_probs, dim=-1)
+
+        # print(f"Predicted Token ID: {predicted_token_ids[0].item()}, Entropy: {entropy.item():.4f}, Neg Mean Top-{k} Log Prob: {neg_mean_topk_log_prob.item():.4f}")
+
         self.current_step_len += 1
         # self.step_confidences.append(neg_mean_topk_log_prob.item())
 
@@ -718,7 +916,6 @@ class LlamaRPCForCausalLM(LlamaForCausalLM):
             if not hasattr(self, '_cot_done_printed'):
                 print("\033[33mCoT Done!!! Start Answering...\033[0m")
                 self._cot_done_printed = True
-        
         # =============== Step-level Compression logic end =================
 
 

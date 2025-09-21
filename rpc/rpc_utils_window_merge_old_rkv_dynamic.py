@@ -103,7 +103,7 @@ class RPCCluster():
         # support gqa
         self.aggregation = aggregation
         self.num_key_value_groups = num_key_value_groups
-        self.agg_func = 'max'
+        self.agg_func = 'mean'
 
         
     def cache_recent(self, current_query_states):
@@ -112,7 +112,7 @@ class RPCCluster():
         else:
             self.cached_recent = torch.cat([self.cached_recent, current_query_states], dim=-2)
 
-    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, col_sum_accu, num_key_value_groups):
+    def compress_kv(self, origin_key_states, origin_value_states, row_sum_accu, num_key_value_groups):
 
         # selectors = self.cached_recent
 
@@ -134,6 +134,25 @@ class RPCCluster():
         # origin_row_sum_accu = row_sum_accu
 
         # row_sum_accu = row_sum_accu[..., :-self.R]
+
+        if self.selectors == 'recent' and self.cached_recent is not None:
+            selectors = self.cached_recent
+            if self.cached_recent.shape[-2] > self.R:
+                # print(f"Warning: cached_recent length {self.cached_recent.shape[-2]} is larger than R {self.R}, truncating recent cache.")
+                selectors = selectors[:, :, -self.R:, :]
+            self.cached_recent = None # for next compress
+
+        # # support gqa
+        key_states = repeat_kv(origin_key_states, self.num_key_value_groups)
+        
+        bsz, num_heads, q_len, head_dim = selectors.shape
+
+  
+        attn_weights = torch.matmul(selectors, key_states.transpose(2, 3)) / math.sqrt(head_dim)
+        # no need to deal with attention mask
+
+        attn_weights = nn.functional.softmax(attn_weights[:, :, :, self.prompt_len:-self.R], dim=-1, dtype=torch.float32).to(selectors.dtype)
+        col_sum_accu = attn_weights.sum(dim = -2)
         
         if self.aggregation == 'all':
 
@@ -174,6 +193,7 @@ class RPCCluster():
 
         alpha = 0.9
         row_col_sum = alpha * (col_attn_cache / self.R) + (1 - alpha) * (row_attn_cache / self.prompt_len) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
+        assert row_col_sum.shape[-1] == self.budget_cot + self.buffer_cot - self.R, f"Expected length before compression is {self.budget_cot + self.buffer_cot - self.R}, but got {row_col_sum.shape[-1]}"
         indices = row_col_sum.topk(self.cp_cot-self.R, dim=-1, largest=True).indices.sort(dim=-1).values
         # row_indices = row_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
         # col_indices = col_attn_cache.topk(self.cp_cot, dim=-1, largest=True).indices.sort(dim=-1).values
