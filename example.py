@@ -2,11 +2,9 @@
 import os
 import fire
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, TextStreamer
+from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, TextStreamer, StoppingCriteria, StoppingCriteriaList
 import transformers
 
-from rpc.llama.llama_vanilla import LlamaForCausalLM
-from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
 from rpc import enable_rpc, set_rpc_config
 from utils.apply_chat_template import apply_chat_template
@@ -19,6 +17,20 @@ from transformers.cache_utils import DynamicCache
 
 from copy import deepcopy
 import torch.nn.functional as F
+
+
+class ModelStopCriteria(StoppingCriteria):
+    """Custom stopping criteria that stops generation when model.stop is True"""
+    
+    def __init__(self, model):
+        self.model = model
+    
+    def __call__(self, input_ids, scores, **kwargs):
+        # Check if the model has a 'early_exit' attribute and if it's True
+        if hasattr(self.model, 'early_exit') and self.model.early_exit:
+            return True
+        return False
+
 
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-7B"
 # "/home/yangx/QwQ-32B"
@@ -37,29 +49,31 @@ import torch.nn.functional as F
 # QwQ 32B
 # Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?
 
-def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
             rpc: bool = False,
+            rpc_mode: str = None, # all, recent, recent+first
             rkv: bool = False,
             rkv_mode: str = None, # rkv, snapkv, h2o, streamingllm
             rkv_budget: int = 4096,
             max_new_tokens: int = 32768,
             # RPC arguments
+            rpc_buffer_cot: int = 128,
             P=4096,
-            R=32,
+            R=8,
             c=4,
             selectors='recent',
             aggregation='all',
-            budget_cot=4096,
-            budget_ans=1024,
+            rpc_budget_cot=4096,
+            rpc_budget_ans=1024,
             cp_ratio=4.0,
-            mode="none", # heatmap, entropy, confidence (if induce answer, set add "_induce_answer")
+            mode="none", # heatmap, entropy, confidence, record_indices, induce_answer, gen_w_inducer
             generate_rounds: bool = False,
             observation_length: int = 1024,
             observation_topk: int = 512,
             window_size: int = 32,
             ):
 
-    attn_implementation = 'eager'
+    attn_implementation = 'flash_attention_2'
     if 'qwq' in model_path.lower():
         top_k = 40
     else:
@@ -68,7 +82,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     print(f"Using Model: {model_path}, therefore top_k={top_k}")
     
     if rpc:
-        enable_rpc(mode)
+        enable_rpc(rpc_mode)
     
     if rkv:
         # ====== build compression config ======
@@ -137,10 +151,60 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             tokenizer.encode("</think>")[-1],
         ]
 
+    elif rpc:
+
+        if "qwen" in model_path.lower() or "qwq" in model_path.lower():
+            from rpc.qwen2.qwen2_config import Qwen2Config
+            from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+            config = Qwen2Config.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = Qwen2ForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+            
+        elif "llama" in model_path.lower():
+            from rpc.llama.llama_config import LlamaConfig
+            from transformers.models.llama.modeling_llama import LlamaForCausalLM
+            config = LlamaConfig.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = LlamaForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+    
+        model.eval()
+
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+        model.newline_token_ids = [
+            tokenizer.encode("\n")[-1],
+            tokenizer.encode(".\n")[-1],
+            tokenizer.encode(")\n")[-1],
+            tokenizer.encode("\n\n")[-1],
+            tokenizer.encode(".\n\n")[-1],
+            tokenizer.encode(")\n\n")[-1],
+        ]
+
+        model.CoT_done_token_ids = [
+            tokenizer.encode("</think>")[-1],
+        ]
+
     else:
 
         if "qwen" in model_path.lower() or "qwq" in model_path.lower():
             from rpc.qwen2.qwen2_config import Qwen2Config
+            from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
             config = Qwen2Config.from_pretrained(model_path)
 
@@ -166,6 +230,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             )
         elif "llama" in model_path.lower():
             from rpc.llama.llama_config import LlamaConfig
+            from rpc.llama.llama_vanilla import LlamaForCausalLM
 
             config = LlamaConfig.from_pretrained(model_path)
 
@@ -202,14 +267,19 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
                             aggregation=aggregation,
                             kernel_size=7,
                             pooling='avgpool',
-                            budget_cot=budget_cot,
-                            budget_ans=budget_ans,
-                            cp_ratio=cp_ratio
+                            budget_cot=rpc_budget_cot,
+                            budget_ans=rpc_budget_ans,
+                            cp_ratio=cp_ratio,
+                            buffer_cot=rpc_buffer_cot,
+                            mode=rpc_mode,
                             )
     elif rkv:
         print([f"RKV Inference -- {rkv_mode} Mode"])
     else:
         print(["Full KV Cache Inference"])
+
+    # Create custom stopping criteria
+    custom_stopping_criteria = StoppingCriteriaList([ModelStopCriteria(model)])
 
     prompt = input("Prompt:")
     prompt = apply_chat_template(tokenizer, prompt)
@@ -278,7 +348,12 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         output_length = outputs[0][context_length:].shape[-1]
         decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
           
-    elif mode == "induce_answer":
+    elif mode == "induce_answer" or mode == "gen_w_inducer":
+
+        if mode == "induce_answer":
+            max_new_tokens = observation_length
+        elif mode == "gen_w_inducer":
+            max_new_tokens = 1757
 
         answer_inducer_ids = tokenizer("\n**Final Answer**\n\nThe final answer is \\boxed", add_special_tokens=False)["input_ids"]
         # print(len(answer_inducer_ids), answer_inducer_ids) 11
@@ -287,7 +362,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         generated_dicts = model.generate(
             input_ids=inputs['input_ids'],
             attention_mask=inputs['attention_mask'],
-            max_new_tokens=observation_length,
+            max_new_tokens=max_new_tokens,
             do_sample=True,
             temperature=0.6,
             top_p=0.95,
@@ -298,16 +373,48 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             output_scores=True,
             streamer=streamer
         )
-        
-        input_ids = generated_dicts.sequences
-        past_key_values = generated_dicts.past_key_values
-        # Concatenate the last token from input_ids with answer_inducer_ids
-        last_token = input_ids[:, -1:]  # Get the last token from input_ids
-        answer_inducer_ids = torch.tensor([answer_inducer_ids], device=input_ids.device)
-        answer_inducer_ids = torch.cat([last_token, answer_inducer_ids], dim=1)
-        output_dicts = model(input_ids=answer_inducer_ids, past_key_values=past_key_values, prompt_len=context_length)
-        outputs = input_ids
-        output_length = outputs[0][context_length:].shape[-1]
+        if mode == "induce_answer":
+            input_ids = generated_dicts.sequences
+            past_key_values = generated_dicts.past_key_values
+            # Concatenate the last token from input_ids with answer_inducer_ids
+            last_token = input_ids[:, -1:]  # Get the last token from input_ids
+            answer_inducer_ids = torch.tensor([answer_inducer_ids], device=input_ids.device)
+            answer_inducer_ids = torch.cat([last_token, answer_inducer_ids], dim=1)
+            output_dicts = model(input_ids=answer_inducer_ids, past_key_values=past_key_values, prompt_len=context_length)
+            outputs = input_ids
+            output_length = outputs[0][context_length:].shape[-1]
+
+        elif mode == "gen_w_inducer":
+            input_ids = generated_dicts.sequences
+            past_key_values = generated_dicts.past_key_values
+
+            outputs = input_ids
+            output_length = outputs[0][context_length:].shape[-1]
+
+            # Append </think> token to input_ids
+            think_end_token = torch.tensor(tokenizer('\n</think>\n\n')['input_ids'], device=input_ids.device).unsqueeze(0)
+            input_ids = torch.cat([input_ids, think_end_token], dim=1)
+
+            generated_dicts = model.generate(
+                input_ids=input_ids,
+                max_new_tokens=32768,
+                do_sample=True,
+                temperature=0.6,
+                top_p=0.95,
+                top_k=top_k,
+                tokenizer=tokenizer,
+                past_key_values=past_key_values,
+                return_dict_in_generate=True,
+                output_scores=True,
+                streamer=streamer
+            )
+
+            input_ids = generated_dicts.sequences
+            past_key_values = generated_dicts.past_key_values
+
+            outputs = input_ids
+            output_length = outputs[0][context_length+output_length:].shape[-1] + output_length
+            
         
     else:
 
@@ -324,13 +431,35 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
                                     temperature=0.6,
                                     top_p=0.95,
                                     top_k=top_k,
-                                    streamer=streamer)
+                                    streamer=streamer,
+                                    )
+            
+            # if rkv_mode:
+
+            #     input_ids = outputs.sequences
+            #     past_key_values = outputs.past_key_values
+
+            #     # Append </think> token to input_ids
+            #     think_end_token = torch.tensor(tokenizer('\n</think>\n\n')['input_ids'], device=input_ids.device).unsqueeze(0)
+            #     input_ids = torch.cat([input_ids, think_end_token], dim=1)
+
+            #     outputs = model.generate(
+            #         input_ids=input_ids,
+            #         max_new_tokens=32768,
+            #         do_sample=True,
+            #         temperature=0.6,
+            #         top_p=0.95,
+            #         top_k=top_k,
+            #         tokenizer=tokenizer,
+            #         past_key_values=past_key_values,
+            #         streamer=streamer
+            #     )
 
         output_length = outputs[0][context_length:].shape[-1]
         decoded_output = tokenizer.decode(outputs[0][context_length:], skip_special_tokens=True)
 
 
-    if rkv_mode:
+    if rkv_mode and mode != "record_indices" and mode != "induce_answer" and mode != "gen_w_inducer":
         # Create data dictionary
         data = {
             "context_length": context_length,
@@ -349,7 +478,26 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         print(f"\nContext Length: {context_length}")
         print(f"Output Length: {output_length}\n")
 
-    elif mode == "record_indices" or mode == "induce_answer":
+    elif rpc_mode and mode != "record_indices" and mode != "induce_answer" and mode != "gen_w_inducer":
+        # Create data dictionary
+        data = {
+            "context_length": context_length,
+            "output_length": output_length,
+            "decoded_output": decoded_output
+        }
+        
+        # Create directory if it doesn't exist and save to JSONL file
+        import os
+        output_dir = "/home/yangx/ReasoningPathCompression/observation"
+        os.makedirs(output_dir, exist_ok=True)
+
+        with open(f"{output_dir}/output_{rpc_mode}.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+        print(f"\nContext Length: {context_length}")
+        print(f"Output Length: {output_length}\n")
+
+    elif mode == "record_indices" or mode == "induce_answer" or mode == "gen_w_inducer":
         print(f"\nContext Length: {context_length}")
         print(f"Output Length: {output_length}\n")
     else:
