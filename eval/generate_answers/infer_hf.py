@@ -57,7 +57,7 @@ def gen_result(data, total_tasks, top_k, task, args, rank=None):
     if args.mode == "rpc" or args.mode == "rkv" or args.mode is None:
         attn_implementation = 'flash_attention_2'
     else:
-        attn_implementation = 'flash_attention_2' if rank is not None else 'eager'
+        attn_implementation = 'flash_attention_2'
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     tokenizer.padding_side = 'left'
@@ -263,6 +263,8 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, default=None, help="heatmap, rpc, ours_all_step, ours_window, ours_window_merge, ours_window_merge_rkv, ours_window_merge_new, dynamic_layer_budget. (None is for uniform allocation)")
     parser.add_argument("--divide_method", type=str, default=None, help="new_line, step_length")
     parser.add_argument("--data_parallel", action="store_true", help="whether use multi-processing")
+    parser.add_argument("--num_shards", type=int, default=1, help="Number of data shards")
+    parser.add_argument("--shard_id", type=int, default=0, help="Shard ID of this instance")
     args = parser.parse_args()
 
     if 'qwq' in args.model_path.lower():
@@ -302,13 +304,21 @@ if __name__ == "__main__":
     if task == "gpqa":
         with open(args.data_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        if args.num_shards > 1:
+            data['questions'] = data['questions'][args.shard_id::args.num_shards]
     elif task == "bbh":
         data = load_dataset(args.data_path, args.bbh_subset)
+        if args.num_shards > 1:
+            data['test'] = data['test'].shard(num_shards=args.num_shards, index=args.shard_id)
     elif task == "aime" or task == "ifeval" or task == "livecodebench":
         with open(args.data_path, 'r', encoding='utf-8') as f:
             data = [json.loads(l) for l in f]
+        if args.num_shards > 1:
+            data = data[args.shard_id::args.num_shards]
     else:
         data = load_dataset(args.data_path)
+        if args.num_shards > 1 and 'test' in data:
+            data['test'] = data['test'].shard(num_shards=args.num_shards, index=args.shard_id)
 
     expanded_data = []
     if task == "aime" or task == "ifeval" or task == "livecodebench":
