@@ -224,3 +224,75 @@ def efficient_gather_operation(
     value_compressed = value_states.gather(dim=2, index=gather_indices)
     
     return key_compressed, value_compressed
+
+
+def apply_step_weights(token_scores, step_lens, step_start_indices, topk_step_indices, topk_step_values):
+    """
+    Apply weights to token scores based on step values in a vectorized manner.
+
+    Args:
+        token_scores (torch.Tensor): The scores for each token. Shape: (bsz, n_head, L)
+        step_lens (list): A list of lengths for each step.
+        step_start_indices (list): A list of start indices for each step.
+        topk_step_indices (torch.Tensor): The indices of the top-k steps. Shape: (bsz, k_steps)
+        topk_step_values (torch.Tensor): The values of the top-k steps. Shape: (bsz, k_steps)
+
+    Returns:
+        torch.Tensor: The token scores with applied weights.
+    """
+    bsz, n_head, L = token_scores.shape
+    device = token_scores.device
+
+    # 1. Convert lists to tensors
+    step_lens_tensor = torch.tensor(step_lens, device=device)
+    step_start_indices_tensor = torch.tensor(step_start_indices, device=device)
+
+    # 2. Get start positions and lengths for each top-k step
+    selected_step_starts = step_start_indices_tensor[topk_step_indices]  # (bsz, k_steps)
+    selected_step_lens = step_lens_tensor[topk_step_indices]            # (bsz, k_steps)
+
+    # 3. Build indices and weights
+    max_len = selected_step_lens.max()
+    seq_indices = torch.arange(max_len, device=device).unsqueeze(0).unsqueeze(0) # (1, 1, max_len)
+
+    # Create a mask to identify valid tokens within each step
+    mask = seq_indices < selected_step_lens.unsqueeze(-1)  # (bsz, k_steps, max_len)
+
+    # Calculate absolute token positions in the L dimension
+    token_indices = selected_step_starts.unsqueeze(-1) + seq_indices  # (bsz, k_steps, max_len)
+
+    # 4. Create weight tensor and populate using scatter_
+    step_weights_expanded = torch.ones_like(token_scores)
+    
+    # Prepare values and indices for scatter
+    values_to_scatter = topk_step_values.unsqueeze(-1).expand(-1, -1, max_len)
+    
+    # Filter valid values and indices
+    valid_values = values_to_scatter[mask]
+    valid_indices = token_indices[mask]
+
+    # Prepare batch indices for scatter
+    bsz_indices = torch.arange(bsz, device=device).view(bsz, 1, 1).expand(-1, topk_step_indices.shape[1], max_len)[mask]
+    
+    # Use a temporary tensor for scattering, ensuring dtype matches token_scores
+    temp_weights = torch.ones(bsz, n_head, L, device=device, dtype=token_scores.dtype)
+    
+    for b in range(bsz):
+        batch_mask = (bsz_indices == b)
+        if batch_mask.any():
+            batch_indices = valid_indices[batch_mask]
+            batch_values = valid_values[batch_mask]
+            
+            # Expand to match n_head dimension
+            scatter_indices = batch_indices.unsqueeze(0).expand(n_head, -1)
+            # Ensure scatter_values has the same dtype as temp_weights
+            scatter_values = batch_values.unsqueeze(0).expand(n_head, -1).to(temp_weights.dtype)
+            
+            temp_weights[b].scatter_(1, scatter_indices.long(), scatter_values)
+
+    # Assign values from the temporary tensor using a mask
+    updated_mask = (temp_weights != 1.0)
+    step_weights_expanded[updated_mask] = temp_weights[updated_mask]
+
+    # Apply weights
+    return token_scores * step_weights_expanded

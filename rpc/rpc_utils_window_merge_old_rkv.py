@@ -166,7 +166,7 @@ class RPCCluster():
             # print(step_scores, "step_scores")
             # 在step级别取topk，现在k_steps应该基于排除最后一个step后的数量
             k_steps = step_scores.size(-1) - 1 if step_scores.size(-1) > 1 else step_scores.size(-1)
-            topk_step_indices = torch.topk(step_scores, k=k_steps, dim=-1, largest=True).indices
+            topk_step_values, topk_step_indices = torch.topk(step_scores, k=k_steps, dim=-1, largest=True, sorted=False)
 
             # if self.layer_idx == 0:
             #     print(step_lens, "step_lens")
@@ -205,7 +205,7 @@ class RPCCluster():
             # if self.layer_idx == 0:
             #     print(selected_indices, "selected_indices")
             
-            if selected_indices[0].shape[-1] <= self.budget_cot:
+            if selected_indices[0].shape[-1] <= self.budget_cot - current_step_len:
 
                 # 直接对selected_indices进行维度扩展，用于gather操作
                 # 将每个batch的索引扩展到 (num_heads, seq_len, head_dim) 的形状
@@ -233,6 +233,23 @@ class RPCCluster():
                 # 计算每个历史 token 的分数：此处保留 head 维度，稍后再做聚合
                 # token_scores 形状: (bsz, n_head, L)
                 token_scores = col_sum_accu.sum(dim = -2)
+
+                # 根据 topk_step_values 对 token_scores 进行加权
+                # 创建一个与 token_scores 形状匹配的权重张量
+                step_weights_expanded = torch.ones_like(token_scores)
+                step_start_indices = [0]
+                for length in step_lens[:-1]:  # 除最后一个step外
+                    step_start_indices.append(step_start_indices[-1] + length)
+                for batch_idx in range(bsz):
+                    for step_idx, step_value in enumerate(topk_step_values[batch_idx]):
+                        step_idx_item = step_idx
+                        start_pos = step_start_indices[step_idx_item]
+                        end_pos = start_pos + step_lens[step_idx_item]
+                        # 将该 step 的权重应用到对应的 token 范围
+                        step_weights_expanded[batch_idx, :, start_pos:end_pos] = step_value.item()
+                
+                # 应用权重
+                token_scores = token_scores * step_weights_expanded
 
                 bsz, n_head, L = token_scores.shape
                 device = token_scores.device
@@ -275,7 +292,7 @@ class RPCCluster():
                 # 对 batch 中每个样本独立计算
                 for b in range(bsz):
                     # 构造屏蔽 mask: True 表示可选，False 表示需要排除
-                    mask = torch.ones(L, dtype=torch.bool, device=device)
+                    mask = torch.zeros(L, dtype=torch.bool, device=device)
                     # 排除已选 step 的 token（这些是相对 self.prompt_len:-self.R 窗口的索引）
                     mask[selected_indices[b]] = True
 
@@ -315,6 +332,8 @@ class RPCCluster():
 
                 # 堆叠为 (bsz, num_heads, k_effm)
                 indices = torch.stack(indices_list, dim=0)
+                
+                # indices = indices.unsqueeze(-1).expand(-1, origin_key_states.size(1), -1, head_dim)
 
                 # Merging
                 target_key_states = origin_key_states[:, :, self.prompt_len:-current_step_len, :]
@@ -357,7 +376,7 @@ class RPCCluster():
             k_prompt = origin_key_states[:, :, :self.prompt_len, :]
             v_prompt = origin_value_states[:, :, :self.prompt_len, :]
 
-            if selected_indices[0].shape[-1] <= self.budget_cot:
+            if selected_indices[0].shape[-1] <= self.budget_cot - current_step_len:
         
                 k_past_compress = origin_key_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
                 v_past_compress = origin_value_states[:, :, self.prompt_len:-current_step_len, :].gather(dim = 2, index = indices)
