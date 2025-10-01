@@ -319,6 +319,10 @@ if __name__ == "__main__":
             data = [json.loads(l) for l in f]
         if args.num_shards > 1:
             data = data[args.shard_id::args.num_shards]
+    elif task == "gsm8k":
+        data = load_dataset(args.data_path, "main")
+        if args.num_shards > 1 and 'test' in data:
+            data['test'] = data['test'].shard(num_shards=args.num_shards, index=args.shard_id)
     else:
         data = load_dataset(args.data_path)
         if args.num_shards > 1 and 'test' in data:
