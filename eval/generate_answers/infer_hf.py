@@ -214,18 +214,22 @@ def gen_result(data, total_tasks, top_k, task, args, rank=None):
             print(f"[Timestamp: {datetime.now()}][{total_tasks} samples remaining]")
             print(f"[Timestamp: {datetime.now()}][{processing} samples on processing]")
         
-        batched_generate(
-            model=model,
-            tokenizer=tokenizer,
-            output_file=args.output_file,
-            batch_dicts=batch_dicts,
-            batch_size=args.batch_size,
-            max_new_tokens=32768,
-            temperature=0.6,
-            top_p=0.95,
-            top_k=top_k,
-            task=task
-        )
+        try:
+            batched_generate(
+                model=model,
+                tokenizer=tokenizer,
+                output_file=args.output_file,
+                batch_dicts=batch_dicts,
+                batch_size=args.batch_size,
+                max_new_tokens=32768,
+                temperature=0.6,
+                top_p=0.95,
+                top_k=top_k,
+                task=task
+            )
+        except Exception as e:
+            print(f"[Error] Batch generation failed: {str(e)}")
+            print(f"[Warning] Skipping current batch and continuing...")
 
         torch.cuda.empty_cache()
 
