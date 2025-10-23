@@ -349,8 +349,41 @@ class RPCCluster():
                 # breakpoint()
                 k_hh_pruned = target_key_states[~mask].view(bsz, num_heads, -1, head_dim)
                 v_hh_pruned = target_value_states[~mask].view(bsz, num_heads, -1, head_dim)
+                
+                # 计算语义相似度（余弦相似度）
+                k_hh_pruned_norm = k_hh_pruned / torch.norm(k_hh_pruned, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)
+                k_hh_recent_norm = k_hh_recent / torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)
+                semantic_similarity = k_hh_pruned_norm @ k_hh_recent_norm.transpose(-1, -2)
+                
+                # 获取pruned和recent token的原始位置索引
+                pruned_positions = torch.arange(target_key_states.shape[2], device=target_key_states.device)[~mask[0, 0]]  # 被剪枝token的位置
+                recent_positions = torch.arange(target_key_states.shape[2], device=target_key_states.device)[mask[0, 0]]   # 保留token的位置
+                
+                # 计算位置权重：允许左右双向合并，并考虑距离
+                # 形状: (num_pruned, num_recent)
+                position_diff = recent_positions.unsqueeze(0) - pruned_positions.unsqueeze(1)  # recent - pruned
+                
+                # 允许左右双向合并：计算绝对距离
+                abs_position_diff = torch.abs(position_diff.float())
+                
+                # 距离权重：距离越近权重越高（主要权重）
+                distance_weights = torch.exp(-0.1 * abs_position_diff)  # 基于绝对距离的权重
+                
+                # 综合权重：距离权重为主导因子
+                position_weights = distance_weights 
+
+                # 应用位置权重到语义相似度
+                # 将位置权重扩展到所有batch和head维度
+                position_weights_expanded = position_weights.unsqueeze(0).unsqueeze(0).expand(bsz, num_heads, -1, -1)
+                
+                # 最终相似度 = 语义相似度 * 位置权重
+                similarity = semantic_similarity * position_weights_expanded
+                similarity = similarity.to(k_hh_recent.dtype)
+                
                 # similarity = k_hh_pruned @ k_hh_recent.transpose(-1, -2) # dot product
-                similarity = (k_hh_pruned / torch.norm(k_hh_pruned, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)) @ ((k_hh_recent / (torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim))).transpose(-1, -2)) # cosin
+                # similarity = (k_hh_pruned / torch.norm(k_hh_pruned, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)) @ ((k_hh_recent / (torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim))).transpose(-1, -2)) # cosin
+
+
                 max_values, max_indices = similarity.max(dim=-1)
                 # breakpoint()   
                 if self.threshold == None:
