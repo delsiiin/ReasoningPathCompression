@@ -19,7 +19,7 @@ CUDA_VISIBLE_DEVICES=0 python example.py --mode confidence --model_path "deepsee
 python draw_heat_map.py --model llama3 --num_layers 32
 
 ## Generate Step-wise Attention Map
-./run_plot_step_wise_attn_map.sh llama 0 31 0.1
+./run_plot_step_wise_attn_map.sh llama3 0 31 0.1
 
 ## Generate Token Entropy
 ./run_plot_token_entropy.sh llama
