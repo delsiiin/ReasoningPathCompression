@@ -1,7 +1,7 @@
 __pycache__
 eval/eval_res
 eval/outputs
-observation/attn_heat_map/
+observation/attn_heat_map*/
 observation/token_entropy/
 observation/token_confidence/
 observation/topk_indices/
