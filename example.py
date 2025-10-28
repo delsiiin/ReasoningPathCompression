@@ -43,7 +43,7 @@ class ModelStopCriteria(StoppingCriteria):
 # R1-llama-8B 594
 # A deep-sea monster rises from the waters once every hundred years to feast on a ship and sate its hunger. Over three hundred years, it has consumed 847 people. Ships have been built larger over time, so each new ship has twice as many people as the last ship. How many people were on the ship the monster ate in the first hundred years?
 
-# R1-qwen-7B
+# R1-qwen-7B 548
 # Ralph is going to practice playing tennis with a tennis ball machine that shoots out tennis balls for Ralph to hit. He loads up the machine with 175 tennis balls to start with. Out of the first 100 balls, he manages to hit 2/5 of them. Of the next 75 tennis balls, he manages to hit 1/3 of them. Out of all the tennis balls, how many did Ralph not hit?
 
 # QwQ 32B
@@ -510,7 +510,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
 
         # Create directory if it doesn't exist and save to JSONL file
         import os
-        output_dir = "/home/yangx/ReasoningPathCompression/observation"
+        output_dir = "/home/yangx/zmw/ReasoningPathCompression/observation"
         os.makedirs(output_dir, exist_ok=True)
 
         with open(f"{output_dir}/output.jsonl", "w", encoding="utf-8") as f:

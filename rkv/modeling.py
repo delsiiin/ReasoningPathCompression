@@ -4,18 +4,23 @@ from typing import List, Optional, Tuple, Union, Callable
 from transformers.utils import logging
 from transformers.processing_utils import Unpack
 from transformers.models.llama.modeling_llama import (
-    apply_rotary_pos_emb
+    apply_rotary_pos_emb,
+    eager_attention_forward,
 )
+
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
-# from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
-# from transformers.models.qwen3.modeling_qwen3 import Qwen3Config
+from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
+from transformers.models.qwen3.modeling_qwen3 import Qwen3Config
 from transformers.cache_utils import Cache
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_outputs import CausalLMOutputWithPast, BaseModelOutputWithPast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+
 
 from .compression import (
     R1KV,
@@ -99,202 +104,23 @@ def LlamaAttention_init(
     )
     # =============== New logic end =================
 
-def LlamaVanillaAttention_forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
-
-        if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
-            query_slices = self.q_proj.weight.split(
-                (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=0
-            )
-            key_slices = self.k_proj.weight.split(key_value_slicing, dim=0)
-            value_slices = self.v_proj.weight.split(key_value_slicing, dim=0)
-
-            query_states = [F.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)]
-            query_states = torch.cat(query_states, dim=-1)
-
-            key_states = [F.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)]
-            key_states = torch.cat(key_states, dim=-1)
-
-            value_states = [F.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)]
-            value_states = torch.cat(value_states, dim=-1)
-
-        else:
-            query_states = self.q_proj(hidden_states)
-            key_states = self.k_proj(hidden_states)
-            value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        if position_embeddings is None:
-            logger.warning_once(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
-            cos, sin = self.rotary_emb(value_states, position_ids)
-        else:
-            cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            # =============== Enable Query Cache ============
-            if not hasattr(past_key_value, "query_cache"):
-                past_key_value.query_cache = {}
-
-            if self.layer_idx not in past_key_value.query_cache:
-                # prefill stage
-                bsz, n_heads, _, head_dim = query_states.shape
-                past_key_value.query_cache[self.layer_idx] = torch.empty(
-                    bsz, n_heads, 0, head_dim
-                )
-                past_key_value.query_cache[self.layer_idx] = query_states[
-                    :, :, -self.config.method_config["window_size"] :, :
-                ]
-            else:
-                # Add current query to cache
-                past_key_value.query_cache[self.layer_idx] = torch.cat(
-                    (past_key_value.query_cache[self.layer_idx], query_states), dim=2
-                )  # [batch, n_q_heads, seq_len, head_dim]
-
-                # Keep only window_size most recent queries
-                window_size = self.config.method_config["window_size"]
-                if past_key_value.query_cache[self.layer_idx].shape[-2] > window_size:
-                    past_key_value.query_cache[self.layer_idx] = past_key_value.query_cache[
-                        self.layer_idx
-                    ][:, :, -window_size:, :]
-            # =============== Enable Query Cache end =========
-
-            # =============== decoding-time compression start ===============
-            cached_queries = past_key_value.query_cache[self.layer_idx]
-            if self.config.compression is None:
-                key_states_compress, value_states_compress = self.kv_cluster.update_kv(
-                    key_states,
-                    cached_queries,  # Use cached queries instead of current query
-                    value_states,
-                )
-
-                if self.config.update_kv is True:
-                    past_key_value.update(
-                        key_states_compress,
-                        value_states_compress,
-                        self.layer_idx,
-                        cache_kwargs,
-                    )
-                else:
-                    past_key_value.update(
-                        key_states,
-                        value_states,
-                        self.layer_idx,
-                        cache_kwargs,
-                    )
-
-            elif self.config.compression is True:
-                key_states, value_states = past_key_value.update(
-                    key_states,
-                    value_states,
-                    self.layer_idx,
-                    cache_kwargs,
-                )
-
-                key_states_compress, value_states_compress = self.kv_cluster.update_kv(
-                    key_states,
-                    cached_queries,  # Use cached queries instead of current query
-                    value_states,
-                )
-
-                if self.config.update_kv is True:
-                    past_key_value.key_cache[self.layer_idx] = key_states_compress
-                    past_key_value.value_cache[self.layer_idx] = value_states_compress
-            else:
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
-                )
-            # =============== decoding-time compression end ===============
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-
-        if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, dim=2)
-            o_proj_slices = self.o_proj.weight.split(self.hidden_size // self.config.pretraining_tp, dim=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
-        else:
-            attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
-
 def LlamaAttention_forward(
     self,
     hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.LongTensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
     past_key_value: Optional[Cache] = None,
-    output_attentions: bool = False,
-    use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
+    **kwargs: Unpack[FlashAttentionKwargs],
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
-
-    output_attentions = False
-
-    bsz, q_len, _ = hidden_states.size()
 
     query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
     key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
     value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-    if position_embeddings is None:
-        logger.warning_once(
-            "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-            "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-            "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.45 `position_ids` will be "
-            "removed and `position_embeddings` will be mandatory."
-        )
-        cos, sin = self.rotary_emb(value_states, position_ids)
-    else:
-        cos, sin = position_embeddings
+    cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     if past_key_value is not None:
@@ -374,65 +200,34 @@ def LlamaAttention_forward(
             )
         # =============== decoding-time compression end ===============
 
-    # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
-    # to be able to avoid many of these transpose/reshape/view.
-
-    dropout_rate = self.attention_dropout if self.training else 0.0
-
-    # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-    # therefore the input hidden states gets silently casted in float32. Hence, we need
-    # cast them back in the correct dtype just to be sure everything works as expected.
-    # This might slowdown training & inference so it is recommended to not cast the LayerNorms
-    # in fp32. (LlamaRMSNorm handles it correctly)
-
-    input_dtype = query_states.dtype
-    if input_dtype == torch.float32:
-        if torch.is_autocast_enabled():
-            target_dtype = torch.get_autocast_gpu_dtype()
-        # Handle the case where the model is quantized
-        elif hasattr(self.config, "_pre_quantization_dtype"):
-            target_dtype = self.config._pre_quantization_dtype
+    attention_interface: Callable = eager_attention_forward
+    if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "sdpa" and kwargs.get(
+            "output_attentions", False
+        ):
+            logger.warning_once(
+                "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            )
         else:
-            target_dtype = self.q_proj.weight.dtype
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
 
-        logger.warning_once(
-            f"The input hidden states seems to be silently casted in float32, this might be related to"
-            f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-            f" {target_dtype}."
-        )
-
-        query_states = query_states.to(target_dtype)
-        key_states = key_states.to(target_dtype)
-        value_states = value_states.to(target_dtype)
-
-    # Reashape to the expected shape for Flash Attention
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-
-    # if self.kv_cluster.num_comp == 1 and self.layer_idx<2:
-    #     breakpoint()
-
-    attn_output = _flash_attention_forward(
+    attn_output, attn_weights = attention_interface(
+        self,
         query_states,
         key_states,
         value_states,
-        attention_mask[:,:key_states.shape[1]] if attention_mask is not None else attention_mask,
-        q_len,
-        position_ids=position_ids,
-        dropout=dropout_rate,
-        sliding_window=getattr(self, "sliding_window", None),
-        use_top_left_mask=self._flash_attn_uses_top_left_mask,
-        is_causal=self.is_causal,
+        attention_mask,
+        dropout=0.0 if not self.training else self.attention_dropout,
+        scaling=self.scaling,
+        **kwargs,
     )
 
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
     attn_output = self.o_proj(attn_output)
-
-    if not output_attentions:
-        attn_weights = None
-
-    return attn_output, attn_weights, past_key_value
+    return attn_output, attn_weights
 
 def Qwen2Attention_init(
     self, config: Qwen2Config, layer_idx: int, compression_config: dict
@@ -473,175 +268,23 @@ def Qwen2Attention_init(
     )
     # =============== New logic end =================
 
-def Qwen2VanillaAttention_forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        if position_embeddings is None:
-            logger.warning_once(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
-            cos, sin = self.rotary_emb(value_states, position_ids)
-        else:
-            cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            # =============== Enable Query Cache ============
-            if not hasattr(past_key_value, "query_cache"):
-                past_key_value.query_cache = {}
-
-            if self.layer_idx not in past_key_value.query_cache:
-                # prefill stage
-                bsz, n_heads, _, head_dim = query_states.shape
-                past_key_value.query_cache[self.layer_idx] = torch.empty(
-                    bsz, n_heads, 0, head_dim
-                )
-                past_key_value.query_cache[self.layer_idx] = query_states[
-                    :, :, -self.config.method_config["window_size"] :, :
-                ]
-            else:
-                # Add current query to cache
-                past_key_value.query_cache[self.layer_idx] = torch.cat(
-                    (past_key_value.query_cache[self.layer_idx], query_states), dim=2
-                )  # [batch, n_q_heads, seq_len, head_dim]
-
-                # Keep only window_size most recent queries
-                window_size = self.config.method_config["window_size"]
-                if past_key_value.query_cache[self.layer_idx].shape[-2] > window_size:
-                    past_key_value.query_cache[self.layer_idx] = past_key_value.query_cache[
-                        self.layer_idx
-                    ][:, :, -window_size:, :]
-            # =============== Enable Query Cache end ===============
-
-            # =============== decoding-time compression start ===============
-            cached_queries = past_key_value.query_cache[self.layer_idx]
-            if self.config.compression is None:
-                key_states_compress, value_states_compress = self.kv_cluster.update_kv(
-                    key_states,
-                    cached_queries,  # Use cached queries instead of current query
-                    value_states,
-                )
-
-                if self.config.update_kv is True:
-                    past_key_value.update(
-                        key_states_compress,
-                        value_states_compress,
-                        self.layer_idx,
-                        cache_kwargs,
-                    )
-                else:
-                    past_key_value.update(
-                        key_states,
-                        value_states,
-                        self.layer_idx,
-                        cache_kwargs,
-                    )
-
-            elif self.config.compression is True:
-                key_states, value_states = past_key_value.update(
-                    key_states,
-                    value_states,
-                    self.layer_idx,
-                    cache_kwargs,
-                )
-
-                key_states_compress, value_states_compress = self.kv_cluster.update_kv(
-                    key_states,
-                    cached_queries,  # Use cached queries instead of current query
-                    value_states,
-                )
-                if self.config.update_kv is True:
-                    past_key_value.key_cache[self.layer_idx] = key_states_compress
-                    past_key_value.value_cache[self.layer_idx] = value_states_compress
-            else:
-                key_states, value_states = past_key_value.update(
-                    key_states, value_states, self.layer_idx, cache_kwargs
-                )
-            # =============== decoding-time compression end ===============
-
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
-
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
-
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-        attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
-
 def Qwen2Attention_forward(
     self,
     hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
     past_key_value: Optional[Cache] = None,
-    output_attentions: bool = False,
-    use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    **kwargs: Unpack[FlashAttentionKwargs],
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
-
-    bsz, q_len, _ = hidden_states.size()
 
     query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
     key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
     value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-    if position_embeddings is None:
-        logger.warning_once(
-            "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-            "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-            "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-            "removed and `position_embeddings` will be mandatory."
-        )
-        cos, sin = self.rotary_emb(value_states, position_ids)
-    else:
-        cos, sin = position_embeddings
+    cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
     if past_key_value is not None:
@@ -720,42 +363,6 @@ def Qwen2Attention_forward(
             )
         # =============== decoding-time compression end ===============
 
-    # flashattention2 kernel handles it automatically
-    # repeat k/v heads if n_kv_heads < n_heads
-    #key_states = repeat_kv(key_states, self.num_key_value_groups)
-    #value_states = repeat_kv(value_states, self.num_key_value_groups)
-    dropout_rate = 0.0 if not self.training else self.attention_dropout
-
-    # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-    # therefore the input hidden states gets silently casted in float32. Hence, we need
-    # cast them back in float16 just to be sure everything works as expected.
-    input_dtype = query_states.dtype
-    if input_dtype == torch.float32:
-        if torch.is_autocast_enabled():
-            target_dtype = torch.get_autocast_gpu_dtype()
-
-
-# Handle the case where the model is quantized
-        elif hasattr(self.config, "_pre_quantization_dtype"):
-            target_dtype = self.config._pre_quantization_dtype
-        else:
-            target_dtype = self.q_proj.weight.dtype
-
-        logger.warning_once(
-            f"The input hidden states seems to be silently casted in float32, this might be related to"
-            f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-            f" {target_dtype}."
-        )
-
-        query_states = query_states.to(target_dtype)
-        key_states = key_states.to(target_dtype)
-        value_states = value_states.to(target_dtype)
-
-    # Reashape to the expected shape for Flash Attention
-    query_states = query_states.transpose(1, 2)
-    key_states = key_states.transpose(1, 2)
-    value_states = value_states.transpose(1, 2)
-    
     sliding_window = None
     if (
         self.config.use_sliding_window
@@ -763,191 +370,198 @@ def Qwen2Attention_forward(
         and self.layer_idx >= self.config.max_window_layers
     ):
         sliding_window = self.config.sliding_window
-    else:
-        sliding_window = None
 
-    attn_output = _flash_attention_forward(
+    attention_interface: Callable = eager_attention_forward
+    if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "sdpa" and kwargs.get(
+            "output_attentions", False
+        ):
+            logger.warning_once(
+                "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            )
+        else:
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
+
+    attn_output, attn_weights = attention_interface(
+        self,
         query_states,
         key_states,
         value_states,
-        attention_mask[:,:key_states.shape[1]] if attention_mask is not None else attention_mask,
-        q_len,
-        position_ids=position_ids,
-        dropout=dropout_rate,
-        sliding_window=sliding_window,
-        is_causal=self.is_causal,
-        use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        attention_mask,
+        dropout=0.0 if not self.training else self.attention_dropout,
+        scaling=self.scaling,
+        sliding_window=sliding_window,  # main diff with Llama
+        **kwargs,
     )
 
-    attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
     attn_output = self.o_proj(attn_output)
+    return attn_output, attn_weights
 
-    if not output_attentions:
-        attn_weights = None
+def Qwen3Attention_init(
+    self, config: Qwen3Config, layer_idx: int, compression_config: dict
+):
+        nn.Module.__init__(self)
+        self.config = config
+        self.layer_idx = layer_idx
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
 
-    return attn_output, attn_weights, past_key_value
+        self.q_proj = nn.Linear(
+            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+        )
+        self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
+        self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
+        self.sliding_window = config.sliding_window
+        if not (
+            self.config.use_sliding_window
+            and getattr(self.config, "sliding_window", None) is not None
+            and self.layer_idx >= self.config.max_window_layers
+        ):
+            self.sliding_window = None
 
-# def Qwen3Attention_init(
-#     self, config: Qwen3Config, layer_idx: int, compression_config: dict
-# ):
-#         nn.Module.__init__(self)
-#         self.config = config
-#         self.layer_idx = layer_idx
-#         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-#         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
-#         self.scaling = self.head_dim**-0.5
-#         self.attention_dropout = config.attention_dropout
-#         self.is_causal = True
+        # =============== New logic start ===============
+        self.config.update(compression_config)
+        self.kv_cluster = KV_COMPRESSION_MAP[compression_config["method"]](
+            layer_idx=self.layer_idx, model_config=self.config, model_type="qwen3", **compression_config["method_config"]
+        )
+        # =============== New logic end =================
 
-#         self.q_proj = nn.Linear(
-#             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
-#         )
-#         self.k_proj = nn.Linear(
-#             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-#         )
-#         self.v_proj = nn.Linear(
-#             config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
-#         )
-#         self.o_proj = nn.Linear(
-#             config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
-#         )
-#         self.q_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # unlike olmo, only on the head dim!
-#         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
-#         self.sliding_window = config.sliding_window
-#         if not (
-#             self.config.use_sliding_window
-#             and getattr(self.config, "sliding_window", None) is not None
-#             and self.layer_idx >= self.config.max_window_layers
-#         ):
-#             self.sliding_window = None
+def Qwen3Attention_forward(
+    self,
+    hidden_states: torch.Tensor,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    past_key_value: Optional[Cache] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+    **kwargs: Unpack[FlashAttentionKwargs],
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    input_shape = hidden_states.shape[:-1]
+    hidden_shape = (*input_shape, -1, self.head_dim)
 
-#         # =============== New logic start ===============
-#         self.config.update(compression_config)
-#         self.kv_cluster = KV_COMPRESSION_MAP[compression_config["method"]](
-#             **compression_config["method_config"]
-#         )
-#         # =============== New logic end =================
+    query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+    key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-# def Qwen3Attention_forward(
-#     self,
-#     hidden_states: torch.Tensor,
-#     position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-#     attention_mask: Optional[torch.Tensor],
-#     past_key_value: Optional[Cache] = None,
-#     cache_position: Optional[torch.LongTensor] = None,
-#     **kwargs: Unpack[FlashAttentionKwargs],
-# ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-#     input_shape = hidden_states.shape[:-1]
-#     hidden_shape = (*input_shape, -1, self.head_dim)
-
-#     query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-#     key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-#     value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-
-#     cos, sin = position_embeddings
-#     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+    cos, sin = position_embeddings
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
 
-#     if past_key_value is not None:
-#         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+    if past_key_value is not None:
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
-#         # =============== Enable Query Cache ============
-#         if not hasattr(past_key_value, "query_cache"):
-#             past_key_value.query_cache = {}
+        # =============== Enable Query Cache ============
+        if not hasattr(past_key_value, "query_cache"):
+            past_key_value.query_cache = {}
 
-#         if self.layer_idx not in past_key_value.query_cache:
-#             # prefill stage
-#             bsz, n_heads, _, head_dim = query_states.shape
-#             past_key_value.query_cache[self.layer_idx] = torch.empty(
-#                 bsz, n_heads, 0, head_dim
-#             )
-#             past_key_value.query_cache[self.layer_idx] = query_states[
-#                 :, :, -self.config.method_config["window_size"] :, :
-#             ]
-#         else:
-#             # Add current query to cache
-#             past_key_value.query_cache[self.layer_idx] = torch.cat(
-#                 (past_key_value.query_cache[self.layer_idx], query_states), dim=2
-#             )  # [batch, n_q_heads, seq_len, head_dim]
+        if self.layer_idx not in past_key_value.query_cache:
+            # prefill stage
+            bsz, n_heads, _, head_dim = query_states.shape
+            past_key_value.query_cache[self.layer_idx] = torch.empty(
+                bsz, n_heads, 0, head_dim
+            )
+            past_key_value.query_cache[self.layer_idx] = query_states[
+                :, :, -self.config.method_config["window_size"] :, :
+            ]
+        else:
+            # Add current query to cache
+            past_key_value.query_cache[self.layer_idx] = torch.cat(
+                (past_key_value.query_cache[self.layer_idx], query_states), dim=2
+            )  # [batch, n_q_heads, seq_len, head_dim]
 
-#             # Keep only window_size most recent queries
-#             window_size = self.config.method_config["window_size"]
-#             if past_key_value.query_cache[self.layer_idx].shape[-2] > window_size:
-#                 past_key_value.query_cache[self.layer_idx] = past_key_value.query_cache[
-#                     self.layer_idx
-#                 ][:, :, -window_size:, :]
-#         # =============== Enable Query Cache end =========
+            # Keep only window_size most recent queries
+            window_size = self.config.method_config["window_size"]
+            if past_key_value.query_cache[self.layer_idx].shape[-2] > window_size:
+                past_key_value.query_cache[self.layer_idx] = past_key_value.query_cache[
+                    self.layer_idx
+                ][:, :, -window_size:, :]
+        # =============== Enable Query Cache end =========
 
-#         # =============== decoding-time compression start ===============
-#         cached_queries = past_key_value.query_cache[self.layer_idx]
-#         if self.config.compression is None:
-#             key_states_compress, value_states_compress = self.kv_cluster.update_kv(
-#                 key_states,
-#                 cached_queries,  # Use cached queries instead of current query
-#                 value_states,
-#             )
+        # =============== decoding-time compression start ===============
+        cached_queries = past_key_value.query_cache[self.layer_idx]
+        if self.config.compression is None:
+            key_states_compress, value_states_compress = self.kv_cluster.update_kv(
+                key_states,
+                cached_queries,  # Use cached queries instead of current query
+                value_states,
+            )
 
-#             past_key_value.update(
-#                 key_states_compress,
-#                 value_states_compress,
-#                 self.layer_idx,
-#                 cache_kwargs,
-#             )
+            past_key_value.update(
+                key_states_compress,
+                value_states_compress,
+                self.layer_idx,
+                cache_kwargs,
+            )
 
-#         elif self.config.compression is True:
-#             key_states, value_states = past_key_value.update(
-#                 key_states,
-#                 value_states,
-#                 self.layer_idx,
-#                 cache_kwargs,
-#             )
+        elif self.config.compression is True:
+            key_states, value_states = past_key_value.update(
+                key_states,
+                value_states,
+                self.layer_idx,
+                cache_kwargs,
+            )
 
-#             key_states_compress, value_states_compress = self.kv_cluster.update_kv(
-#                 key_states,
-#                 cached_queries,  # Use cached queries instead of current query
-#                 value_states,
-#             )
+            key_states_compress, value_states_compress = self.kv_cluster.update_kv(
+                key_states,
+                cached_queries,  # Use cached queries instead of current query
+                value_states,
+            )
 
-#             past_key_value.key_cache[self.layer_idx] = key_states_compress
-#             past_key_value.value_cache[self.layer_idx] = value_states_compress
-#         else:
-#             key_states, value_states = past_key_value.update(
-#                 key_states, value_states, self.layer_idx, cache_kwargs
-#             )
-#         # =============== decoding-time compression end ===============
+            past_key_value.key_cache[self.layer_idx] = key_states_compress
+            past_key_value.value_cache[self.layer_idx] = value_states_compress
+        else:
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
+        # =============== decoding-time compression end ===============
 
-#     attention_interface: Callable = eager_attention_forward
-#     if self.config._attn_implementation != "eager":
-#         if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
-#             logger.warning_once(
-#                 "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-#                 'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-#             )
-#         else:
-#             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    attention_interface: Callable = eager_attention_forward
+    if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+            logger.warning_once(
+                "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            )
+        else:
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-#     attn_output, attn_weights = attention_interface(
-#         self,
-#         query_states,
-#         key_states,
-#         value_states,
-#         attention_mask,
-#         dropout=0.0 if not self.training else self.attention_dropout,
-#         scaling=self.scaling,
-#         sliding_window=self.sliding_window,  # diff with Llama
-#         **kwargs,
-#     )
+    attn_output, attn_weights = attention_interface(
+        self,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        dropout=0.0 if not self.training else self.attention_dropout,
+        scaling=self.scaling,
+        sliding_window=self.sliding_window,  # diff with Llama
+        **kwargs,
+    )
 
-#     attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-#     attn_output = self.o_proj(attn_output)
-#     return attn_output, attn_weights
+    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+    attn_output = self.o_proj(attn_output)
+    return attn_output, attn_weights
 
 def CausalLM_forward(
     self,
     input_ids: torch.LongTensor = None,
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
-    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
     labels: Optional[torch.LongTensor] = None,
     use_cache: Optional[bool] = None,
@@ -955,7 +569,7 @@ def CausalLM_forward(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     cache_position: Optional[torch.LongTensor] = None,
-    num_logits_to_keep: int = 0,
+    logits_to_keep: Union[int, torch.Tensor] = 0,
     **kwargs,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     output_attentions = (
@@ -973,7 +587,7 @@ def CausalLM_forward(
     )
 
     # sample-level statistics
-    if input_ids.shape[-1] > 1:
+    if len(past_key_values) == 0:
         if self.config.compression_content == "think":
             self.after_think = False
 
@@ -999,7 +613,12 @@ def CausalLM_forward(
 
     hidden_states = outputs[0]
     # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
+    slice_indices = (
+        slice(-logits_to_keep, None)
+        if isinstance(logits_to_keep, int)
+        else logits_to_keep
+    )
+    logits = self.lm_head(hidden_states[:, slice_indices, :])
 
     # =============== Step-level Compression logic start ===============
     # assume non-batch input, shape: [1, logits_to_keep, vocab_size]
@@ -1082,18 +701,12 @@ def CausalLM_forward(
 
     loss = None
     if labels is not None:
-        # Upcast to float if we need to compute the loss to avoid potential precision issues
-        logits = logits.float()
-        # Shift so that tokens < n predict n
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
-        # Flatten the tokens
-        loss_fct = CrossEntropyLoss()
-        shift_logits = shift_logits.view(-1, self.config.vocab_size)
-        shift_labels = shift_labels.view(-1)
-        # Enable model parallelism
-        shift_labels = shift_labels.to(shift_logits.device)
-        loss = loss_fct(shift_logits, shift_labels)
+        loss = self.loss_function(
+            logits=logits,
+            labels=labels,
+            vocab_size=self.config.vocab_size,
+            **kwargs,
+        )
 
     if not return_dict:
         output = (logits,) + outputs[1:]

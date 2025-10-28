@@ -8,10 +8,6 @@ import argparse
 def draw_heat_map(model, num_layers):
     for layer_idx in range(num_layers):
         attn_weights = torch.load(f"/home/yangx/ReasoningPathCompression/observation/attn_heat_map_token/{model}/attn_weights_layer_{layer_idx}.pt")
-        # 将上三角部分赋值为无穷小（不包括对角线）
-        mask = torch.triu(torch.ones_like(attn_weights, dtype=torch.bool), diagonal=1)
-        attn_weights = attn_weights.masked_fill(mask, float('-inf'))
-        attn_weights = attn_weights.softmax(dim=-1)
         print(attn_weights.shape)
         plt.figure(figsize=(12, 10))
         sns.heatmap(attn_weights.detach().to(torch.float).cpu().numpy(), cmap='Reds', vmin=0, vmax=0.01, xticklabels=True, yticklabels=True, square=True)

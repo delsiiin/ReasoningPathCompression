@@ -1,30 +1,27 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 import warnings
-import time
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from .qwen2_vanilla import (
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.models.qwen2.modeling_qwen2 import (
     apply_rotary_pos_emb,
     repeat_kv,
+    eager_attention_forward,
     Qwen2Attention,
-    Qwen2FlashAttention2,
-    Qwen2Model,
-    Qwen2ForCausalLM,
-    _prepare_4d_causal_attention_mask_with_cache_position
+    Qwen2Model
 )
+from .qwen2_config import Qwen2Config
 from transformers.utils import (
     logging,
+    TransformersKwargs
 )
+from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from rpc.rpc_utils_window_merge_old_rkv import init_rpc
-from rpc.step_lens_optimizer import (
-    update_step_lens_optimized,
-    build_final_indices_optimized,
-    efficient_gather_operation
-)
 
 import math
 import numpy as np
@@ -44,6 +41,11 @@ from transformers.utils import (
     is_torchdynamo_compiling,
     logging,
     replace_return_docstrings,
+)
+from rpc.step_lens_optimizer import (
+    update_step_lens_optimized,
+    build_final_indices_optimized,
+    efficient_gather_operation
 )
 
 logger = logging.get_logger(__name__)
@@ -121,106 +123,77 @@ def restore_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     num_key_value_heads = num_attention_heads // n_rep
     return hidden_states.view(batch, num_key_value_heads, n_rep, seqlen, head_dim)[:, :, 0, :, :]
 
-class Qwen2RPCAttention(Qwen2Attention):
-    """
-    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
-    and "Generating Long Sequences with Sparse Transformers".
-    """
+def Qwen2_Ours_init(self, config: Qwen2Config, layer_idx: int):
+    nn.Module.__init__(self)
+    self.config = config
+    self.layer_idx = layer_idx
+    self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+    self.scaling = self.head_dim**-0.5
+    self.attention_dropout = config.attention_dropout
+    self.is_causal = True
+    self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=True)
+    self.k_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=True)
+    self.v_proj = nn.Linear(config.hidden_size, config.num_key_value_heads * self.head_dim, bias=True)
+    self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
+    self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+    init_rpc(self)
+    self.verbose = False
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        init_rpc(self)
-        self.verbose = False
+    self.cache_mode = "vanilla"  # options: vanilla, compression
 
-        self.cache_mode = "vanilla"  # options: vanilla, compression
+    self.layer_budget_importance = None
 
-        self.layer_budget_importance = None
+    self.row_sum_accu = None
+    self.col_sum_accu = None
 
+    self.question_cache = None
+
+    self.step_lens = []
+    self.is_new_step = False
+
+def Qwen2_Ours_forward(
+    self,
+    hidden_states: torch.Tensor,
+    position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    past_key_value: Optional[Cache] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+    **kwargs: Unpack[FlashAttentionKwargs],
+) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
+    input_shape = hidden_states.shape[:-1]
+    bsz, q_len, _ = hidden_states.size()
+    hidden_shape = (*input_shape, -1, self.head_dim)
+
+    query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+    key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+    value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+    cos, sin = position_embeddings
+    query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
+    if q_len != 1:
+        # save cache length for prefill
+        self.kv_cluster.prompt_len = key_states.size()[-2]
+        self.kv_cluster.num_comp = 0
+        self.kv_cluster.threshold = None
         self.row_sum_accu = None
         self.col_sum_accu = None
+        self.layer_budget_importance = None
+        self.cache_mode = "vanilla"
+        self.question_cache = query_states
+        self.step_lens = []
+        self.is_new_step = False
+        self.current_step_len = 0
+        if hasattr(self, "_cot_done_printed"):
+            delattr(self, "_cot_done_printed")
 
-        self.question_cache = None
-    
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-       
-        if position_embeddings is None:
-            logger.warning_once(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
-            cos, sin = self.rotary_emb(value_states, position_ids)
-        else:
-            cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-            if q_len != 1:
-                # save cache length for prefill
-                self.kv_cluster.prompt_len = key_states.size()[-2]
-                self.kv_cluster.num_comp = 0
-                self.kv_cluster.threshold = None
-                self.row_sum_accu = None
-                self.col_sum_accu = None
-                self.layer_budget_importance = None
-                self.cache_mode = "vanilla"
-                self.question_cache = query_states
-                self.step_lens = []
-                self.is_new_step = False
-                self.current_step_len = 0
-                if hasattr(self, "_cot_done_printed"):
-                    delattr(self, "_cot_done_printed")
-    
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
-
-        # if self.cache_mode == "vanilla":
-
-        #     if self.layer_idx == 0 and not hasattr(self, "_cot_done_printed"):
-        #         print("\033[33mCoT Done!!! Start Answering...\033[0m")
-        #         self._cot_done_printed = True
-
-        #     # upcast attention to fp32
-        #     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        #     attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-        #     attn_output = torch.matmul(attn_weights, value_states)
+    if past_key_value is not None:
+        # sin and cos are specific to RoPE models; cache_position needed for the static cache
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         if q_len == 1:
-
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            attn_output = torch.matmul(attn_weights, value_states)
 
             self.kv_cluster.cache_recent(query_states)
             if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
@@ -238,7 +211,7 @@ class Qwen2RPCAttention(Qwen2Attention):
 
             if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
 
-                print(target_length, "target_length")
+                # print(target_length, "target_length")
 
                 # if self.layer_idx == 5:
                 #     print(selectors.shape[-2], "selectors.shape")
@@ -256,9 +229,6 @@ class Qwen2RPCAttention(Qwen2Attention):
 
                 ques_attn_weights_sum = None
 
-                key_states = restore_kv(key_states, self.num_key_value_groups)
-                value_states = restore_kv(value_states, self.num_key_value_groups)
-                
                 key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
 
                 self.step_lens = updated_step_lens
@@ -268,15 +238,15 @@ class Qwen2RPCAttention(Qwen2Attention):
                     # print(key_states_compress, "key_states_compress before second compression")
                     
                     similarity_cos = cal_similarity(
-                            key_states_compress,  # 包装成列表格式以匹配函数期望
-                            retain_ratio=0.2,
-                            retain_direction="last",
-                        )[..., :-current_step_len]
+                        key_states_compress,  # 包装成列表格式以匹配函数期望
+                        retain_ratio=0.2,
+                        retain_direction="last",
+                    )[..., :-current_step_len]
 
                     # print(similarity_cos.shape, "similarity_cos")
                     # 选择similarity_cos中最小的budget_cot个位置
                     min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
-
+                    
                     # 对索引进行排序以保持原始顺序
                     min_indices_sorted = torch.sort(min_indices, dim=-1).values
                     # print(min_indices_sorted.shape, "min_indices_sorted")
@@ -325,486 +295,54 @@ class Qwen2RPCAttention(Qwen2Attention):
         
         else:
 
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            attn_output = torch.matmul(attn_weights, value_states)
-
             if self.layer_idx == 0:
                 print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
 
+    attention_interface: Callable = eager_attention_forward
+    if self.config._attn_implementation != "eager":
+        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
-            raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
-            )
+    # Change Mask [TODO]
+    if q_len == 1 and self.config._attn_implementation == "eager":
+        attention_mask = None
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
-
-        attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
-    
-
-class Qwen2RPCFlashAttention(Qwen2FlashAttention2):
-    """
-    Multi-headed attention from 'Attention Is All You Need' paper. Modified to use sliding window attention: Longformer
-    and "Generating Long Sequences with Sparse Transformers".
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        init_rpc(self)
-        self.verbose = False
-
-        self.cache_mode = "vanilla"  # options: vanilla, compression
-
-        self.layer_budget_importance = None
-
-        self.row_sum_accu = None
-        self.col_sum_accu = None
-
-        self.question_cache = None
-
-        self.step_lens = []
-        self.is_new_step = False
-   
-
-    def forward(
+    attn_output, attn_weights = attention_interface(
         self,
-        hidden_states: torch.Tensor,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        dropout=0.0 if not self.training else self.attention_dropout,
+        scaling=self.scaling,
+        sliding_window=self.sliding_window,  # main diff with Llama
+        **kwargs,
+    )
+
+    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+    attn_output = self.o_proj(attn_output)
+    return attn_output, attn_weights
+
+def Qwen2_Ours_CausalLM_forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
-    ):
-        bsz, q_len, _ = hidden_states.size()
-
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        if position_embeddings is None:
-            logger.warning_once(
-                "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-                "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-                "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-                "removed and `position_embeddings` will be mandatory."
-            )
-            cos, sin = self.rotary_emb(value_states, position_ids)
-        else:
-            cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-
-        if q_len != 1:
-            # save cache length for prefill
-            self.kv_cluster.prompt_len = key_states.size()[-2]
-            self.kv_cluster.num_comp = 0
-            self.kv_cluster.threshold = None
-            self.row_sum_accu = None
-            self.col_sum_accu = None
-            self.layer_budget_importance = None
-            self.cache_mode = "vanilla"
-            self.question_cache = query_states
-            self.step_lens = []
-            self.is_new_step = False
-            self.current_step_len = 0
-            if hasattr(self, "_cot_done_printed"):
-                delattr(self, "_cot_done_printed")
-
-        if past_key_value is not None:
-            # Activate slicing cache only if the config has a value `sliding_windows` attribute
-            cache_has_contents = past_key_value.get_seq_length(self.layer_idx) > 0
-            kv_seq_len = key_states.shape[-2] + cache_position[0]
-            if (
-                getattr(self.config, "sliding_window", None) is not None
-                and kv_seq_len > self.config.sliding_window
-                and cache_has_contents
-            ):
-                slicing_tokens = 1 - self.config.sliding_window
-
-                past_key = past_key_value[self.layer_idx][0]
-                past_value = past_key_value[self.layer_idx][1]
-
-                past_key = past_key[:, :, slicing_tokens:, :].contiguous()
-                past_value = past_value[:, :, slicing_tokens:, :].contiguous()
-
-                if past_key.shape[-2] != self.config.sliding_window - 1:
-                    raise ValueError(
-                        f"past key must have a shape of (`batch_size, num_heads, self.config.sliding_window-1, head_dim`), got"
-                        f" {past_key.shape}"
-                    )
-
-                if attention_mask is not None:
-                    attention_mask = attention_mask[:, slicing_tokens:]
-                    attention_mask = torch.cat([attention_mask, torch.ones_like(attention_mask[:, -1:])], dim=-1)
-
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-            if q_len == 1:
-
-                self.kv_cluster.cache_recent(query_states)
-                if self.kv_cluster.cached_recent.shape[-2] > self.kv_cluster.R:
-                    self.kv_cluster.cached_recent = self.kv_cluster.cached_recent[:, :, -self.kv_cluster.R :, :]
-
-                if not self.is_new_step:
-                    self.current_step_len += 1
-                else:
-                    current_step_len = self.current_step_len
-                    self.current_step_len = 0
-                    self.is_new_step = False
-
-                # cannot use 'past_key_value.get_seq_length'
-                target_length = past_key_value.key_cache[self.layer_idx].size()[-2] - self.kv_cluster.prompt_len 
-
-                if target_length >= self.kv_cluster.budget_cot and self.cache_mode == "compression":
-
-                    # print(target_length, "target_length")
-
-                    # if self.layer_idx == 5:
-                    #     print(selectors.shape[-2], "selectors.shape")
-                    
-                    # question = self.question_cache
-
-                    # bsz, num_heads, ques_len, head_dim = question.shape
-
-            
-                    # ques_attn_weights = torch.matmul(question, key_states.transpose(2, 3)) / math.sqrt(head_dim)
-                    # # no need to deal with attention mask
-
-                    # ques_attn_weights = nn.functional.softmax(ques_attn_weights[:, :, :, self.kv_cluster.prompt_len:], dim=-1, dtype=torch.float32).to(question.dtype)
-                    # ques_attn_weights_sum = ques_attn_weights.sum(dim = -2)
-
-                    ques_attn_weights_sum = None
-
-                    key_states_compress, value_states_compress, updated_step_lens= self.kv_cluster.compress_kv(key_states, value_states, ques_attn_weights_sum, self.col_sum_accu, self.num_key_value_groups, self.step_lens, current_step_len)
-
-                    self.step_lens = updated_step_lens
-
-                    if key_states_compress.size(-2) - self.kv_cluster.prompt_len > self.kv_cluster.budget_cot:
-
-                        # print(key_states_compress, "key_states_compress before second compression")
-                        
-                        similarity_cos = cal_similarity(
-                            key_states_compress,  # 包装成列表格式以匹配函数期望
-                            retain_ratio=0.2,
-                            retain_direction="last",
-                        )[..., :-current_step_len]
-
-                        # print(similarity_cos.shape, "similarity_cos")
-                        # 选择similarity_cos中最小的budget_cot个位置
-                        min_indices = torch.topk(similarity_cos[..., self.kv_cluster.prompt_len:], k=self.kv_cluster.budget_cot - current_step_len, dim=-1, largest=False).indices
-                        
-                        # 对索引进行排序以保持原始顺序
-                        min_indices_sorted = torch.sort(min_indices, dim=-1).values
-                        # print(min_indices_sorted.shape, "min_indices_sorted")
-
-
-                        
-                        # 使用优化的索引构建和gather操作
-                        device = key_states_compress.device
-                        seq_len = key_states_compress.size(-2)
-                        num_heads = key_states_compress.size(1)
-                        recent_len = current_step_len
-                        
-                        # 高效构建final_indices
-                        final_indices = build_final_indices_optimized(
-                            bsz, num_heads, self.kv_cluster.prompt_len,
-                            min_indices_sorted, seq_len, recent_len, device
-                        )
-                        
-                        # 高效进行gather操作
-                        key_states_compress, value_states_compress = efficient_gather_operation(
-                            key_states_compress, value_states_compress, final_indices
-                        )
-
-                        # print(key_states_compress.shape, "key_states_compress after second compression")
-                        
-                        # 高效更新step_lens - 使用优化的向量化实现
-                        # step_lens_start_time = time.time()
-                        if len(self.step_lens) > 0:
-                            self.step_lens = update_step_lens_optimized(
-                                self.step_lens, 
-                                min_indices_sorted[0], 
-                                min_indices_sorted.device
-                            )
-                            
-                            # step_lens_end_time = time.time()
-                            # step_lens_update_time = step_lens_end_time - step_lens_start_time
-                            # if self.layer_idx == 0:  # 只在第一层打印，避免输出过多
-                            #     print(f"Step_lens update time: {step_lens_update_time:.4f}s")
-
-                    
-                    # replace with compressed cache
-                    past_key_value.key_cache[self.layer_idx] = key_states_compress
-                    past_key_value.value_cache[self.layer_idx] = value_states_compress
-                    
-                    self.kv_cluster.num_comp += 1
-            
-            else:
-
-                if self.layer_idx == 0:
-                    print("\033[33mInput Done!!! Start Compressing CoT...\033[0m")
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        # key_states = repeat_kv(key_states, self.num_key_value_groups)
-        # value_states = repeat_kv(value_states, self.num_key_value_groups)
-        dropout_rate = 0.0 if not self.training else self.attention_dropout
-
-        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
-        # therefore the input hidden states gets silently casted in float32. Hence, we need
-        # cast them back in float16 just to be sure everything works as expected.
-        input_dtype = query_states.dtype
-        if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                target_dtype = torch.get_autocast_gpu_dtype()
-            # Handle the case where the model is quantized
-            elif hasattr(self.config, "_pre_quantization_dtype"):
-                target_dtype = self.config._pre_quantization_dtype
-            else:
-                target_dtype = self.q_proj.weight.dtype
-
-            logger.warning_once(
-                f"The input hidden states seems to be silently casted in float32, this might be related to"
-                f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
-                f" {target_dtype}."
-            )
-
-            query_states = query_states.to(target_dtype)
-            key_states = key_states.to(target_dtype)
-            value_states = value_states.to(target_dtype)
-
-        # Reashape to the expected shape for Flash Attention
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)
-
-        if (
-            self.config.use_sliding_window
-            and getattr(self.config, "sliding_window", None) is not None
-            and self.layer_idx >= self.config.max_window_layers
-        ):
-            sliding_window = self.config.sliding_window
-        else:
-            sliding_window = None
-
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            q_len,
-            position_ids=position_ids,
-            dropout=dropout_rate,
-            sliding_window=sliding_window,
-            is_causal=self.is_causal,
-            use_top_left_mask=self._flash_attn_uses_top_left_mask,
-        )
-
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
-        attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
-    
-
-class Qwen2RPCModel(Qwen2Model):
-    """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen2DecoderLayer`]
-
-    Args:
-        config: Qwen2Config
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
-            )
-
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
-                use_cache = False
-
-        # kept for BC (non `Cache` `past_key_values` inputs)
-        return_legacy_cache = False
-        if use_cache and not isinstance(past_key_values, Cache):
-            return_legacy_cache = True
-            if past_key_values is None:
-                past_key_values = DynamicCache()
-            else:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                logger.warning_once(
-                    "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
-                    "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
-                    "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
-                )
-
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
-
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
-
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        )
-
-        hidden_states = inputs_embeds
-
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-        next_decoder_cache = None
-
-        for decoder_layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    causal_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    cache_position,
-                    position_embeddings,
-                )
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                )
-
-            hidden_states = layer_outputs[0]
-
-            if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
-
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
-
-        hidden_states = self.norm(hidden_states)
-
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
-
-        next_cache = next_decoder_cache if use_cache else None
-        if return_legacy_cache:
-            next_cache = next_cache.to_legacy_cache()
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
-        return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
-        )
-    
-
-class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    
-    def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        num_logits_to_keep: int = 0,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> CausalLMOutputWithPast:
         r"""
-        Args:
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
-
-            num_logits_to_keep (`int`, *optional*):
-                Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
-                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
-                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
-
-        Returns:
-
         Example:
 
         ```python
         >>> from transformers import AutoTokenizer, Qwen2ForCausalLM
 
-        >>> model = Qwen2ForCausalLM.from_pretrained(PATH_TO_CONVERTED_WEIGHTS)
-        >>> tokenizer = AutoTokenizer.from_pretrained(PATH_TO_CONVERTED_TOKENIZER)
+        >>> model = Qwen2ForCausalLM.from_pretrained("meta-qwen2/Qwen2-2-7b-hf")
+        >>> tokenizer = AutoTokenizer.from_pretrained("meta-qwen2/Qwen2-2-7b-hf")
 
         >>> prompt = "Hey, are you conscious? Can you talk to me?"
         >>> inputs = tokenizer(prompt, return_tensors="pt")
@@ -814,35 +352,21 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
+        outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
             cache_position=cache_position,
+            **kwargs,
         )
 
-        hidden_states = outputs[0]
-        if labels is None and not is_torchdynamo_compiling():
-            logger.warning_once(
-                "Starting from v4.46, the `logits` model output will have the same type as the model (except at train time, where it will always be FP32)"
-            )
+        hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        # TODO: remove the float() operation in v4.46
-        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).float()
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         if input_ids.shape[-1] > 1:
             self.is_newline = False
@@ -921,22 +445,7 @@ class Qwen2RPCForCausalLM(Qwen2ForCausalLM):
 
         loss = None
         if labels is not None:
-            # Upcast to float if we need to compute the loss to avoid potential precision issues
-            logits = logits.float()
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,
