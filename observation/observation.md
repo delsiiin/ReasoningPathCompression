@@ -1,8 +1,13 @@
-# Vanilla Inference Observation
+# Vanilla Inference Observation (eager)
 
-## Generate Attetion Score Using Heatmap Mode
-CUDA_VISIBLE_DEVICES=0 python example.py --mode heatmap --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+## Generate Attetion Score Using Heatmap Mode (token)
+CUDA_VISIBLE_DEVICES=0 python example.py --mode token_heatmap --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 (Need to change the kv length in llama_vanilla.py)
+
+## Generate Attetion Score Using Heatmap Mode (step)
+CUDA_VISIBLE_DEVICES=0 python example.py --mode step_heatmap --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+(Need to change the kv length in llama_vanilla.py)
+
 
 ## Generate Token Entropy Using Entropy Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --mode entropy --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
@@ -11,7 +16,7 @@ CUDA_VISIBLE_DEVICES=0 python example.py --mode entropy --model_path "deepseek-a
 CUDA_VISIBLE_DEVICES=0 python example.py --mode confidence --model_path "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 ## Generate Token-wise Attention Map
-python draw_heat_map.py --model llama --num_layers 32
+python draw_heat_map.py --model llama3 --num_layers 32
 
 ## Generate Step-wise Attention Map
 ./run_plot_step_wise_attn_map.sh llama 0 31 0.1
@@ -24,7 +29,7 @@ python draw_heat_map.py --model llama --num_layers 32
 
 
 
-# Compressed Inference Observation (streamingllm, h2o, snapkv, r-kv)
+# Compressed Inference Observation (streamingllm, h2o, snapkv, r-kv) (eager)
 
 ## Generate Token Entropy Using Entropy Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode entropy --rkv_budget 1024

@@ -468,10 +468,10 @@ class Qwen2Attention(nn.Module):
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        if "heatmap" in self.config.mode:
+        if "token_heatmap" in self.config.mode:
 
             import os
-            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map/qwen2'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map_token/qwen2'
             os.makedirs(folder_path, exist_ok=True)
 
             # 设置保存路径
@@ -505,6 +505,40 @@ class Qwen2Attention(nn.Module):
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+        if "step_heatmap" in self.config.mode:
+
+            import os
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map_step/qwen2'
+            os.makedirs(folder_path, exist_ok=True)
+
+            # 设置保存路径
+            save_path = f'{folder_path}/attn_weights_layer_{self.layer_idx}.pt'
+
+            # 检查文件是否已存在
+            if q_len == 1:
+
+                kv_len = key_states.shape[-2]
+            
+                save_tgt = torch.load(save_path)
+
+                zeros = torch.zeros(q_len, 838-kv_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+
+                cur_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
+
+                save_tgt = torch.cat([save_tgt, cur_tgt], dim=0)
+
+                # 保存张量
+                torch.save(save_tgt, save_path)
+
+            elif q_len != 1:
+
+                zeros = torch.zeros(q_len, 838-q_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+
+                save_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
+
+                # 保存张量
+                torch.save(save_tgt, save_path)
 
         if q_len == 1 and self.config.mode == "record_indices":
             if target_length > self.config.observation_length:

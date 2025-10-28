@@ -40,7 +40,7 @@ class ModelStopCriteria(StoppingCriteria):
 
 # Heatmap Prompt
 
-# R1-llama-8B
+# R1-llama-8B 594
 # A deep-sea monster rises from the waters once every hundred years to feast on a ship and sate its hunger. Over three hundred years, it has consumed 847 people. Ships have been built larger over time, so each new ship has twice as many people as the last ship. How many people were on the ship the monster ate in the first hundred years?
 
 # R1-qwen-7B
@@ -66,14 +66,14 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
             rpc_budget_cot=4096,
             rpc_budget_ans=1024,
             cp_ratio=4.0,
-            mode="none", # heatmap, entropy, confidence, record_indices, induce_answer, gen_w_inducer
+            mode="none", # token_heatmap, step_heatmap, entropy, confidence, record_indices, induce_answer, gen_w_inducer
             generate_rounds: bool = False,
             observation_length: int = 1024,
             observation_topk: int = 512,
             window_size: int = 32,
             ):
 
-    attn_implementation = 'flash_attention_2'
+    attn_implementation = 'eager'
     if 'qwq' in model_path.lower():
         top_k = 40
     else:

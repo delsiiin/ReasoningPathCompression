@@ -7,7 +7,7 @@ import argparse
 
 def draw_heat_map(model, num_layers):
     for layer_idx in range(num_layers):
-        attn_weights = torch.load(f"/home/yangx/ReasoningPathCompression/observation/attn_heat_map/{model}/attn_weights_layer_{layer_idx}.pt")
+        attn_weights = torch.load(f"/home/yangx/ReasoningPathCompression/observation/attn_heat_map_token/{model}/attn_weights_layer_{layer_idx}.pt")
         # 将上三角部分赋值为无穷小（不包括对角线）
         mask = torch.triu(torch.ones_like(attn_weights, dtype=torch.bool), diagonal=1)
         attn_weights = attn_weights.masked_fill(mask, float('-inf'))
@@ -24,7 +24,7 @@ def draw_heat_map(model, num_layers):
         plt.show()
 
         import os
-        folder_path = f'/home/yangx/ReasoningPathCompression/observation/attn_heat_map/token_wise/{model}'
+        folder_path = f'/home/yangx/ReasoningPathCompression/observation/attn_heat_map_token/token_wise/{model}'
         os.makedirs(folder_path, exist_ok=True)
 
         plt.savefig(f"{folder_path}/{layer_idx}.pdf")

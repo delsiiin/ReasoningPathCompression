@@ -21,7 +21,7 @@ def parse_args():
     
     # Attention相关参数
     parser.add_argument("--attn_dir", type=str, 
-                       default="/home/zmw/idea/context_compression/ReasoningPathCompression/observation/attn_heat_map/llama3",
+                       default="/home/zmw/idea/context_compression/ReasoningPathCompression/observation/attn_heat_map_step/llama3",
                        help="attention权重文件目录路径")
     parser.add_argument("--layer_id", "-l", type=int, default=15,
                        help="要分析的层数 (默认: 20)")
@@ -31,7 +31,7 @@ def parse_args():
                        help="是否跳过answer部分的注意力分数")
 
     # 输出相关参数
-    parser.add_argument("--output_dir", "-o", type=str, default="/home/zmw/idea/context_compression/ReasoningPathCompression/attn_heat_map/llama3",
+    parser.add_argument("--output_dir", "-o", type=str, default="/home/zmw/idea/context_compression/ReasoningPathCompression/attn_heat_map_step/llama3",
                        help="输出的热力图文件夹")
     parser.add_argument("--figure_size", nargs=2, type=int, default=[10, 8],
                        help="图像大小 [宽, 高] (默认: [10, 8])")
