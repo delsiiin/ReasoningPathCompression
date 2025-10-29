@@ -72,10 +72,15 @@ def measure_throughput(
 
     # Generate output file name if not provided
     if output_file is None:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name = model_path.split("/")[-1] if "/" in model_path else model_path
         rpc_suffix = "_rpc" if rpc else "_baseline"
-        output_file = f"/home/yangx/zmw/ReasoningPathCompression/benchmark/throughput_results_{model_name}{rpc_suffix}_{batch_size}_{output_len}_{timestamp}.txt"
+        output_file = f"/home/yangx/zmw/ReasoningPathCompression/benchmark/throughput_results_{model_name}{rpc_suffix}_{batch_size}_{output_len}.txt"
+
+    # Check if output file already exists
+    if os.path.exists(output_file):
+        print(f"Output file already exists: {output_file}")
+        print("Program terminated to avoid overwriting existing results.")
+        return
 
     num_gpus = torch.cuda.device_count()
 
