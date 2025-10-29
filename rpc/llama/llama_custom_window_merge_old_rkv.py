@@ -179,6 +179,10 @@ def Llama_Ours_forward(
     if self.config._attn_implementation != "eager":
         attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
+    # Change Mask [TODO]
+    if q_len == 1 and self.config._attn_implementation == "eager":
+        attention_mask = None
+
     attn_output, attn_weights = attention_interface(
         self,
         query_states,

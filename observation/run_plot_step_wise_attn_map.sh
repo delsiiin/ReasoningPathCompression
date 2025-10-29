@@ -10,14 +10,19 @@ END_LAYER=${3:-31}
 VMAX=${4:-0.05}
 
 # 根据模型设置tokenizer和attention目录
-if [ "$MODEL" = "qwen" ]; then
+# 根据模型设置tokenizer和attention目录
+if [ "$MODEL" = "qwen2" ]; then
     TOKENIZER_NAME="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-    ATTN_DIR="attn_heat_map/qwen2"
+    ATTN_DIR="attn_heat_map_step/qwen2"
     OUTPUT_DIR="attn_heat_map/step_wise/qwen2"
-elif [ "$MODEL" = "llama" ]; then
+elif [ "$MODEL" = "llama3" ]; then
     TOKENIZER_NAME="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-    ATTN_DIR="attn_heat_map/llama3"
+    ATTN_DIR="attn_heat_map_step/llama3"
     OUTPUT_DIR="attn_heat_map/step_wise/llama3"
+elif [ "$MODEL" = "qwq" ]; then
+    TOKENIZER_NAME="Qwen/QwQ-32B"
+    ATTN_DIR="attn_heat_map_step/qwq"
+    OUTPUT_DIR="attn_heat_map/step_wise/qwq"
 else
     echo "错误: 不支持的模型 '$MODEL'. 请使用 'qwen' 或 'llama'"
     exit 1

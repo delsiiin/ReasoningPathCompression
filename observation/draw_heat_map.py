@@ -10,7 +10,7 @@ def draw_heat_map(model, num_layers):
         attn_weights = torch.load(f"/home/yangx/ReasoningPathCompression/observation/attn_heat_map_token/{model}/attn_weights_layer_{layer_idx}.pt")
         print(attn_weights.shape)
         plt.figure(figsize=(12, 10))
-        sns.heatmap(attn_weights.detach().to(torch.float).cpu().numpy(), cmap='Reds', vmin=0, vmax=0.01, xticklabels=True, yticklabels=True, square=True)
+        sns.heatmap(attn_weights.detach().to(torch.float).cpu().numpy(), cmap='Blues', vmin=0, vmax=0.01, xticklabels=True, yticklabels=True, square=True)
         plt.title(f'Attention Heatmap (Prefill + Decode)')
         plt.xlabel('Key Position')
         plt.ylabel('Query Position')
