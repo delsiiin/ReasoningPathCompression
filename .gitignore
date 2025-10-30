@@ -9,3 +9,4 @@ observation/*.jsonl
 datasets/
 eval/profile/ca_ratios/
 eval/profile/grad_dir/
+benchmark/*.txt
