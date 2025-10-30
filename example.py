@@ -46,7 +46,7 @@ class ModelStopCriteria(StoppingCriteria):
 # R1-qwen-7B 548
 # Ralph is going to practice playing tennis with a tennis ball machine that shoots out tennis balls for Ralph to hit. He loads up the machine with 175 tennis balls to start with. Out of the first 100 balls, he manages to hit 2/5 of them. Of the next 75 tennis balls, he manages to hit 1/3 of them. Out of all the tennis balls, how many did Ralph not hit?
 
-# QwQ 32B
+# QwQ 32B (838) Qwen3 30B (547) GPT-OSS 20B ()
 # Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?
 
 def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
