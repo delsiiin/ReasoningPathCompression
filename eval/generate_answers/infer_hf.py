@@ -63,7 +63,7 @@ def gen_result(data, total_tasks, top_k, task, args, rank=None):
     tokenizer.padding_side = 'left'
 
     if args.mode != "rkv":
-        if "qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
+        if "distill-qwen" in args.model_path.lower() or "qwq" in args.model_path.lower():
             config = Qwen2Config.from_pretrained(args.model_path)
             config.update({'mode':args.mode})
             config.update({'divide_method':args.divide_method})

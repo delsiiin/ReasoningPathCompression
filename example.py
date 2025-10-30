@@ -153,7 +153,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
 
     elif rpc:
 
-        if "qwen" in model_path.lower() or "qwq" in model_path.lower():
+        if "distill-qwen" in model_path.lower() or "qwq" in model_path.lower():
             from rpc.qwen2.qwen2_config import Qwen2Config
             from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
             config = Qwen2Config.from_pretrained(model_path)
@@ -202,7 +202,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
 
     else:
 
-        if "qwen" in model_path.lower() or "qwq" in model_path.lower():
+        if "distill-qwen" in model_path.lower() or "qwq" in model_path.lower():
             from rpc.qwen2.qwen2_config import Qwen2Config
             from rpc.qwen2.qwen2_vanilla import Qwen2ForCausalLM
 
