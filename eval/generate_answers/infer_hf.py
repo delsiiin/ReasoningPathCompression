@@ -25,10 +25,14 @@ from rpc.llama.llama_config import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 from rpc.qwen2.qwen2_config import Qwen2Config
 from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+from rpc.qwen3.qwen3_config import Qwen3MoeConfig
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
+from rpc.gpt_oss.gpt_oss_config import GptOssConfig
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
 from rkv.monkeypatch import replace_llama, replace_qwen2
 
-def gen_result(data, total_tasks, top_k, task, args, rank=None):
+def gen_result(data, total_tasks, top_k, temperature, top_p, task, args, rank=None):
     """
     Unified function for both single-process and data-parallel inference.
     
@@ -68,6 +72,60 @@ def gen_result(data, total_tasks, top_k, task, args, rank=None):
             config.update({'mode':args.mode})
             config.update({'divide_method':args.divide_method})
             model = Qwen2ForCausalLM.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map=device_map
+            )
+            if not use_auto_device:
+                model = model.to(device)
+            
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.CoT_done_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
+        elif "qwen3" in args.model_path.lower():
+            config = Qwen3MoeConfig.from_pretrained(args.model_path)
+            config.update({'mode':args.mode})
+            config.update({'divide_method':args.divide_method})
+            model = Qwen3MoeForCausalLM.from_pretrained(
+                args.model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map=device_map
+            )
+            if not use_auto_device:
+                model = model.to(device)
+            
+            model.newline_token_ids = [
+                tokenizer.encode("\n")[-1],
+                tokenizer.encode(".\n")[-1],
+                tokenizer.encode(")\n")[-1],
+                tokenizer.encode("\n\n")[-1],
+                tokenizer.encode(".\n\n")[-1],
+                tokenizer.encode(")\n\n")[-1],
+            ]
+
+            model.CoT_done_token_ids = [
+                tokenizer.encode("</think>")[-1],
+            ]
+        elif "gpt" in args.model_path.lower():
+            config = GptOssConfig.from_pretrained(args.model_path)
+            config.update({'mode':args.mode})
+            config.update({'divide_method':args.divide_method})
+            model = GptOssForCausalLM.from_pretrained(
                 args.model_path,
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
@@ -222,8 +280,8 @@ def gen_result(data, total_tasks, top_k, task, args, rank=None):
                 batch_dicts=batch_dicts,
                 batch_size=args.batch_size,
                 max_new_tokens=32768,
-                temperature=0.6,
-                top_p=0.95,
+                temperature=temperature,
+                top_p=top_p,
                 top_k=top_k,
                 task=task
             )
@@ -273,10 +331,22 @@ if __name__ == "__main__":
 
     if 'qwq' in args.model_path.lower():
         top_k = 40
+        temperature = 0.6
+        top_p = 0.95
+    elif "qwen3" in args.model_path.lower():
+        top_k = 20
+        temperature = 0.8
+        top_p = 0.7
+    elif "gpt" in args.model_path.lower():
+        top_k = None
+        temperature = 1
+        top_p = 1
     else:
         top_k = None
+        temperature = 0.6
+        top_p = 0.95
 
-    print(f"Using Model: {args.model_path}, therefore top_k={top_k}")
+    print(f"Using Model: {args.model_path}, therefore top_k={top_k}, temperature={temperature}, top_p={top_p}")
 
     if "aime" in args.data_path.lower():
         task = "aime"
@@ -382,7 +452,7 @@ if __name__ == "__main__":
 
         processes = []
         for rank in range(world_size):
-            p = mp.Process(target=gen_result, args=(data_subsets[rank], total_tasks, top_k, task, args, rank))
+            p = mp.Process(target=gen_result, args=(data_subsets[rank], total_tasks, top_k, temperature, top_p, task, args, rank))
 
             p.start()
 
@@ -393,7 +463,7 @@ if __name__ == "__main__":
     
     else:
 
-        gen_result(expanded_data, total_tasks, top_k, task, args)
+        gen_result(expanded_data, total_tasks, top_k, temperature, top_p, task, args)
 
 
     

@@ -40,7 +40,7 @@ CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_
 ./run_plot_token_confidence.sh llama h2o
 
 ## Compare Important Indices w/ Different Compressed Methods
-### Vanilla Continue Gen (eg. 1510 = 102 + 128*10 + 128, 1537 = 155(prompt) + 102 + 128*10)
+### Vanilla Continue Gen (eg. 1510 = 102 + 128*10 + 128(统计步数以计算平均值), 1537 = 155(prompt) + 102 + 128*10)
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 1510  --mode record_indices --observation_length 1537 --observation_topk 256
 ### Compression Methods (eg. 1383 = 1537 - 155 + 1, 1537 = 155(prompt) + 102 + 128*10)
 CUDA_VISIBLE_DEVICES=0 python example.py --rkv True --rkv_mode snapkv --mode record_indices --observation_length 1383 --observation_topk 256 --window_size 8 --rkv_budget 1537

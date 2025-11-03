@@ -6,6 +6,7 @@ import seaborn as sns
 import numpy as np
 import json
 import matplotlib.pyplot as plt
+from torch.nn import functional as F
 
 def parse_args():
     parser = argparse.ArgumentParser(description="分析文本段落的token数并绘制step-wise attention热力图")
@@ -167,13 +168,21 @@ def main():
             # 将上三角部分赋值为无穷小（不包括对角线）
             mask = torch.triu(torch.ones_like(attn_score_tensor, dtype=torch.bool), diagonal=1)
             attn_score_tensor = attn_score_tensor.masked_fill(mask, float('-inf'))
-            attn_score_tensor = attn_score_tensor.softmax(dim=-1)
+            if "gpt" in args.tokenizer_name.lower():
+                attn_score_tensor = F.softmax(attn_score_tensor, dim=-1)
+                attn_score_tensor = attn_score_tensor[..., :-1]
+            else:
+                attn_score_tensor = attn_score_tensor.softmax(dim=-1)
     else:
         attn_score_tensor = attn_score_tensor[prompt_len:, prompt_len:]
         # 将上三角部分赋值为无穷小（不包括对角线）
         mask = torch.triu(torch.ones_like(attn_score_tensor, dtype=torch.bool), diagonal=1)
         attn_score_tensor = attn_score_tensor.masked_fill(mask, float('-inf'))
-        attn_score_tensor = attn_score_tensor.softmax(dim=-1)
+        if "gpt" in args.tokenizer_name.lower():
+            attn_score_tensor = F.softmax(attn_score_tensor, dim=-1)
+            attn_score_tensor = attn_score_tensor[..., :-1]
+        else:
+            attn_score_tensor = attn_score_tensor.softmax(dim=-1)
 
     # 计算step-wise attention分数
     print("计算step-wise attention分数...")

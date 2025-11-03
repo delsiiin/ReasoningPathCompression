@@ -44,6 +44,7 @@ from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
 from transformers.utils.generic import OutputRecorder, check_model_inputs
 from .qwen3_config import Qwen3MoeConfig
+import math
 
 
 def rotate_half(x):
@@ -110,8 +111,81 @@ def eager_attention_forward(
         causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
         attn_weights = attn_weights + causal_mask
 
+    if "step_heatmap" in module.config.mode:
+
+        import os
+        folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/attn_heat_map_step/qwen3'
+        os.makedirs(folder_path, exist_ok=True)
+
+        # 设置保存路径
+        save_path = f'{folder_path}/attn_weights_layer_{module.layer_idx}.pt'
+
+        q_len = query.shape[-2]
+
+        # 检查文件是否已存在
+        if q_len == 1:
+
+            kv_len = key_states.shape[-2]
+        
+            save_tgt = torch.load(save_path)
+
+            zeros = torch.zeros(q_len, 548-1-kv_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+
+            cur_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
+
+            save_tgt = torch.cat([save_tgt, cur_tgt], dim=0)
+
+            # 保存张量
+            torch.save(save_tgt, save_path)
+
+        elif q_len != 1:
+
+            zeros = torch.zeros(q_len, 548-1-q_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+
+            save_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
+
+            # 保存张量
+            torch.save(save_tgt, save_path)
+
     attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
     attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+
+    if "token_heatmap" in module.config.mode:
+
+        import os
+        folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/attn_heat_map_token/qwen3'
+        os.makedirs(folder_path, exist_ok=True)
+
+        # 设置保存路径
+        save_path = f'{folder_path}/attn_weights_layer_{module.layer_idx}.pt'
+
+        q_len = query.shape[-2]
+
+        # 检查文件是否已存在
+        if q_len == 1:
+
+            kv_len = key_states.shape[-2]
+        
+            save_tgt = torch.load(save_path)
+
+            zeros = torch.zeros(q_len, 548-1-kv_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+
+            cur_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
+
+            save_tgt = torch.cat([save_tgt, cur_tgt], dim=0)
+
+            # 保存张量
+            torch.save(save_tgt, save_path)
+
+        elif q_len != 1:
+
+            zeros = torch.zeros(q_len, 548-1-q_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+
+            save_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
+
+            # 保存张量
+            torch.save(save_tgt, save_path)
+
     attn_output = torch.matmul(attn_weights, value_states)
     attn_output = attn_output.transpose(1, 2).contiguous()
 
@@ -156,6 +230,7 @@ class Qwen3MoeAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
+        bsz, q_len, _ = hidden_states.size()
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
@@ -166,10 +241,94 @@ class Qwen3MoeAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
+        if q_len != 1:
+            self.prompt_len = q_len
+            self.cached_recent = None
+
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+            # Decoding
+            if (q_len == 1) or (q_len != 1 and self.config.mode == "induce_answer"):
+                
+                if self.config.mode in ["induce_answer", "record_indices"]:
+                    # cannot use 'past_key_value.get_seq_length'
+                    target_length = past_key_value.key_cache[self.layer_idx].size()[-2]
+                    
+                    if target_length > self.config.observation_length - self.config.window_size:
+                        # cache recent query states as selectors
+                        self.cache_recent(query_states)
+
+                # if target_length == self.config.observation_length and self.config.mode == "observation_window":
+                    
+                #     selectors = self.cached_recent
+                #     self.cached_recent = None # for next compress
+
+                #     # # support gqa
+                #     key_states_obs = repeat_kv(key_states, self.num_key_value_groups)
+                    
+                #     bsz, num_heads, _, head_dim = selectors.shape
+
+                #     attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
+                #     # no need to deal with attention mask
+
+                #     attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, self.prompt_len:-self.config.window_size], dim=-1, dtype=torch.float32).to(selectors.dtype)
+                #     attn_weights_sum = attn_weights_obs.sum(dim = -2)
+
+                #     attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
+                   
+                #     attn_weights_sum = attn_weights_sum.max(dim=-2).values
+
+                #     attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
+
+                #     indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+
+                #     # Create directory if it doesn't exist
+                #     folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/qwen2/snapkv'
+                #     import os
+                #     os.makedirs(folder_path, exist_ok=True)
+
+                #     # Save indices to file
+                #     save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length}_top_{self.config.observation_topk}.pt'
+                #     torch.save(indices, save_path)
+
+                if self.config.mode == "induce_answer":
+
+                    if "prompt_len" in kwargs.keys() and kwargs["prompt_len"] is not None:
+                        prompt_len = kwargs["prompt_len"]
+
+                        # selectors = self.cached_recent
+                        # self.cached_recent = None # for next compress   
+                        # selectors = torch.cat([selectors, query_states], dim=-2)
+                        selectors = query_states
+                        # # support gqa
+                        key_states_obs = repeat_kv(key_states, self.num_key_value_groups)
+                        
+                        bsz, num_heads, _, head_dim = selectors.shape
+
+                        attn_weights_obs = torch.matmul(selectors, key_states_obs.transpose(2, 3)) / math.sqrt(head_dim)
+                        # [CAUTIOUS ABOUT KEY LENGTH]
+                        attn_weights_obs = nn.functional.softmax(attn_weights_obs[:, :, :, :-selectors.shape[-2]-self.config.window_size], dim=-1, dtype=torch.float32).to(query_states.dtype)
+                        attn_weights_sum = attn_weights_obs.sum(dim = -2)
+
+                        attn_weights_sum = attn_weights_sum.view(attn_weights_sum.shape[0], -1, self.num_key_value_groups, attn_weights_sum.shape[-1])
+                        
+                        attn_weights_sum = attn_weights_sum.max(dim=-2).values
+
+                        attn_cache = F.max_pool1d(attn_weights_sum, kernel_size = 7, padding=7//2, stride=1)
+
+                        indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+                        
+                        # Create directory if it doesn't exist
+                        folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/topk_indices/qwen3/induced'
+                        import os 
+                        os.makedirs(folder_path, exist_ok=True)
+
+                        # Save indices to file
+                        save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{self.config.observation_length+prompt_len}_top_{self.config.observation_topk}.pt'
+                        torch.save(indices, save_path)
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
@@ -186,6 +345,37 @@ class Qwen3MoeAttention(nn.Module):
             sliding_window=self.sliding_window,  # diff with Llama
             **kwargs,
         )
+
+        if q_len == 1 and self.config.mode == "record_indices":
+            if target_length > self.config.observation_length:
+                # Get the indices of top-k values in attention weights for the observation
+                obs_length = self.config.observation_length
+                topk = self.config.observation_topk
+
+                # Extract attention weights for the observation window (excluding prompt and recent window)
+                attn_weights_obs = attn_weights[:, :, :, :]
+
+                attn_weights_sum = attn_weights_obs.view(attn_weights_obs.shape[0], -1, self.num_key_value_groups, attn_weights_obs.shape[-1])
+
+                attn_weights_sum = attn_weights_sum.max(dim=-2).values
+
+                # Get top-k indices for each position
+                topk_indices = torch.topk(attn_weights_sum, k=topk, dim=-1, largest=True).indices.sort(dim=-1).values 
+
+                # Create directory if it doesn't exist
+                import os
+                folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/topk_indices/qwen3/continue_gen'
+                os.makedirs(folder_path, exist_ok=True)
+
+                # Save indices to file
+                save_path = f'{folder_path}/topk_indices_layer_{self.layer_idx}_observe_{obs_length}_top_{topk}.pt'
+                
+                # Check if file exists and concatenate or create new
+                if os.path.exists(save_path):
+                    existing_indices = torch.load(save_path)
+                    topk_indices = torch.cat([existing_indices, topk_indices], dim=0)
+                
+                torch.save(topk_indices, save_path)
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
@@ -664,6 +854,62 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        # Calculate information entropy of logits over vocabulary
+        if "entropy" in self.config.mode:
+            import torch.nn.functional as F
+            
+            # Apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1)
+            
+            # Calculate entropy: H = -sum(p * log(p))
+            # Add small epsilon to avoid log(0)
+            epsilon = 1e-8
+            log_probs = torch.log(probs + epsilon)
+            entropy = -torch.sum(probs * log_probs, dim=-1)
+            
+            import os
+            # Save entropy to file
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/qwen3'
+            os.makedirs(folder_path, exist_ok=True)
+            save_path = f'{folder_path}/entropy.pt'
+
+            # Check if file exists and concatenate or create new
+            if os.path.exists(save_path):
+                existing_entropy = torch.load(save_path)
+                entropy = torch.cat([existing_entropy, entropy], dim=-1)
+
+            torch.save(entropy, save_path)
+
+        if "confidence" in self.config.mode:
+            import torch.nn.functional as F
+            
+            # Get top-k probabilities
+            k = getattr(self.config, 'topk_size', 20)  # Default to top-20 if not specified
+
+            # Apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1)
+            
+            # Get top-k probabilities
+            topk_probs, _ = torch.topk(probs, k, dim=-1)
+            
+            # Calculate log of top-k probabilities and negative mean
+            epsilon = 1e-8  # Avoid log(0)
+            topk_log_probs = torch.log(topk_probs + epsilon)
+            neg_mean_topk_log_prob = -torch.mean(topk_log_probs, dim=-1)
+            
+            # Save to file
+            import os
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/token_confidence/qwen3'
+            os.makedirs(folder_path, exist_ok=True)
+            save_path = f'{folder_path}/confidence.pt'
+
+            # Check if file exists and concatenate or create new
+            if os.path.exists(save_path):
+                existing_data = torch.load(save_path)
+                neg_mean_topk_log_prob = torch.cat([existing_data, neg_mean_topk_log_prob], dim=-1)
+
+            torch.save(neg_mean_topk_log_prob, save_path)
 
         loss = None
         if labels is not None:

@@ -195,6 +195,11 @@ class Qwen3MoeConfig(PretrainedConfig):
         output_router_logits=False,
         router_aux_loss_coef=0.001,
         mlp_only_layers=None,
+        mode=None,
+        divide_method=None,
+        observation_length=None,
+        observation_topk=None,
+        window_size=None,  # legacy, do not use
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -220,6 +225,12 @@ class Qwen3MoeConfig(PretrainedConfig):
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
+
+        self.mode = mode
+        self.divide_method = divide_method
+        self.observation_length = observation_length
+        self.observation_topk = observation_topk
+        self.window_size = window_size
 
         # MoE arguments
         self.decoder_sparse_step = decoder_sparse_step

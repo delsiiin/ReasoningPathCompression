@@ -6,12 +6,16 @@ import torch
 
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, Qwen2ForCausalLM
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaForCausalLM
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention, GptOssForCausalLM
+from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeAttention, Qwen3MoeForCausalLM
 
 from rpc.qwen2.qwen2_custom_rpc import Qwen2_RPC_init, Qwen2_RPC_forward
 from rpc.llama.llama_custom_rpc import Llama_RPC_init, Llama_RPC_forward
 
 from rpc.qwen2.qwen2_custom_window_merge_old_rkv import Qwen2_Ours_init, Qwen2_Ours_forward, Qwen2_Ours_CausalLM_forward
 from rpc.llama.llama_custom_window_merge_old_rkv import Llama_Ours_init, Llama_Ours_forward, Llama_Ours_CausalLM_forward
+from rpc.gpt_oss.gpt_oss_custom_window_merge_old_rkv import Gpt_Oss_Ours_init, Gpt_Oss_Ours_forward, Gpt_Oss_Ours_CausalLM_forward
+from rpc.qwen3.qwen3_custom_window_merge_old_rkv import Qwen3_Ours_init, Qwen3_Ours_forward, Qwen3_Ours_CausalLM_forward
 
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from .flash_attn.flash_attention import flash_attention_forward
@@ -51,6 +55,14 @@ def enable_rpc(mode=None):
         LlamaAttention.__init__ = Llama_Ours_init
         LlamaAttention.forward = Llama_Ours_forward
         LlamaForCausalLM.forward = Llama_Ours_CausalLM_forward
+
+        GptOssAttention.__init__ = Gpt_Oss_Ours_init
+        GptOssAttention.forward = Gpt_Oss_Ours_forward
+        GptOssForCausalLM.forward = Gpt_Oss_Ours_CausalLM_forward
+
+        Qwen3MoeAttention.__init__ = Qwen3_Ours_init
+        Qwen3MoeAttention.forward = Qwen3_Ours_forward
+        Qwen3MoeForCausalLM.forward = Qwen3_Ours_CausalLM_forward
 
         ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = flash_attention_forward
 

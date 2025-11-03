@@ -49,7 +49,7 @@ class ModelStopCriteria(StoppingCriteria):
 # QwQ 32B (838) Qwen3 30B (547) GPT-OSS 20B ()
 # Betty is saving money for a new wallet which costs $100. Betty has only half of the money she needs. Her parents decided to give her $15 for that purpose, and her grandparents twice as much as her parents. How much more money does Betty need to buy the wallet?
 
-def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             rpc: bool = False,
             rpc_mode: str = None, # all, recent, recent+first
             rkv: bool = False,
@@ -76,10 +76,22 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
     attn_implementation = 'eager'
     if 'qwq' in model_path.lower():
         top_k = 40
+        temperature = 0.6
+        top_p = 0.95
+    elif "qwen3" in model_path.lower():
+        top_k = 20
+        temperature = 0.8
+        top_p = 0.7
+    elif "gpt" in model_path.lower():
+        top_k = None
+        temperature = 1
+        top_p = 1
     else:
         top_k = None
+        temperature = 0.6
+        top_p = 0.95
 
-    print(f"Using Model: {model_path}, therefore top_k={top_k}")
+    print(f"Using Model: {model_path}, therefore top_k={top_k}, temperature={temperature}, top_p={top_p}")
     
     if rpc:
         enable_rpc(rpc_mode)
@@ -167,7 +179,34 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
                 config=config,
                 device_map="auto"
             )
-            
+        elif "qwen3" in model_path.lower():
+            from rpc.qwen3.qwen3_config import Qwen3MoeConfig
+            from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
+            config = Qwen3MoeConfig.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = Qwen3MoeForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+        elif "gpt" in model_path.lower():
+            from rpc.gpt_oss.gpt_oss_config import GptOssConfig
+            from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
+            config = GptOssConfig.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = GptOssForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
         elif "llama" in model_path.lower():
             from rpc.llama.llama_config import LlamaConfig
             from transformers.models.llama.modeling_llama import LlamaForCausalLM
@@ -228,6 +267,34 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
                 attn_implementation=attn_implementation,
                 config=config
             )
+
+        elif "qwen3" in model_path.lower():
+            from rpc.qwen3.qwen3_config import Qwen3MoeConfig
+            from rpc.qwen3.qwen3_vanilla import Qwen3MoeForCausalLM
+
+            config = Qwen3MoeConfig.from_pretrained(model_path)
+
+            config.update({'mode':mode})
+
+            if mode == "record_indices":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':window_size})
+            elif mode == "induce_answer":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':window_size})
+                config.update({'induce_answer':True})
+
+            model = Qwen3MoeForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config
+            )
+
         elif "llama" in model_path.lower():
             from rpc.llama.llama_config import LlamaConfig
             from rpc.llama.llama_vanilla import LlamaForCausalLM
@@ -254,6 +321,34 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
                 attn_implementation=attn_implementation,
                 config=config
             )
+
+        elif "gpt" in model_path.lower():
+            from rpc.gpt_oss.gpt_oss_config import GptOssConfig
+            from rpc.gpt_oss.gpt_oss_vanilla import GptOssForCausalLM
+
+            config = GptOssConfig.from_pretrained(model_path)
+
+            config.update({'mode':mode})
+
+            if mode == "record_indices":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':window_size})
+            elif mode == "induce_answer":
+                config.update({'observation_length':observation_length})
+                config.update({'observation_topk':observation_topk})
+                config.update({'window_size':window_size})
+                config.update({'induce_answer':True})
+
+            model = GptOssForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config
+            )
+
         tokenizer = AutoTokenizer.from_pretrained(model_path)
     
     streamer = TextStreamer(tokenizer)
@@ -309,8 +404,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
                     attention_mask=inputs['attention_mask'],
                     max_new_tokens=max_new_tokens,
                     do_sample=True,
-                    temperature=0.6,
-                    top_p=0.95,
+                    temperature=temperature,
+                    top_p=top_p,
                     top_k=top_k,
                     eos_token_id=stop_ids,
                     tokenizer=tokenizer,
@@ -327,8 +422,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
                     input_ids=input_ids,
                     max_new_tokens=max_new_tokens,
                     do_sample=True,
-                    temperature=0.6,
-                    top_p=0.95,
+                    temperature=temperature,
+                    top_p=top_p,
                     top_k=top_k,
                     tokenizer=tokenizer,
                     eos_token_id=stop_ids,
@@ -364,8 +459,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
             attention_mask=inputs['attention_mask'],
             max_new_tokens=max_new_tokens,
             do_sample=True,
-            temperature=0.6,
-            top_p=0.95,
+            temperature=temperature,
+            top_p=top_p,
             top_k=top_k,
             tokenizer=tokenizer,
             past_key_values=past_key_values,
@@ -399,8 +494,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
                 input_ids=input_ids,
                 max_new_tokens=32768,
                 do_sample=True,
-                temperature=0.6,
-                top_p=0.95,
+                temperature=temperature,
+                top_p=top_p,
                 top_k=top_k,
                 tokenizer=tokenizer,
                 past_key_values=past_key_values,
@@ -428,8 +523,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
                                     pad_token_id=tokenizer.pad_token_id,
                                     use_cache=True,
                                     do_sample=True,
-                                    temperature=0.6,
-                                    top_p=0.95,
+                                    temperature=temperature,
+                                    top_p=top_p,
                                     top_k=top_k,
                                     streamer=streamer,
                                     )

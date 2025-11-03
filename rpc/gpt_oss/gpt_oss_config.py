@@ -69,6 +69,11 @@ class GptOssConfig(PretrainedConfig):
         output_router_logits=False,
         use_cache=True,
         layer_types=None,
+        mode=None,
+        divide_method=None,
+        observation_length=None,
+        observation_topk=None,
+        window_size=None,  # legacy, do not use
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -97,6 +102,12 @@ class GptOssConfig(PretrainedConfig):
                 "sliding_attention" if bool((i + 1) % 2) else "full_attention" for i in range(self.num_hidden_layers)
             ]
         layer_type_validation(self.layer_types)
+
+        self.mode = mode
+        self.divide_method = divide_method
+        self.observation_length = observation_length
+        self.observation_topk = observation_topk
+        self.window_size = window_size
 
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, copy it it to 'rope_type'.

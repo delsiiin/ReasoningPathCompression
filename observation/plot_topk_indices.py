@@ -353,6 +353,73 @@ def plot_comparison_enhanced(base_dir, model_type, layer_idx, output_dir, observ
     print(f"Enhanced comparison saved to: {save_path}")
     plt.close()  # 关闭图形以节省内存
 
+def save_hit_rates_as_tensor(all_hit_rates, model_type, output_dir, observation_length=1024, topk=512, reference_data_type='snapkv'):
+    """
+    将 all_hit_rates 转换为张量并保存
+    
+    Args:
+        all_hit_rates: 字典，key为layer_idx，value为对应的hit_rates数组
+        model_type: 模型类型
+        output_dir: 输出目录
+        observation_length: 观察长度
+        topk: topk值
+        reference_data_type: 参考数据类型
+    """
+    if not all_hit_rates:
+        print("Warning: No hit rates data to save")
+        return
+    
+    # 获取层索引列表并排序
+    layer_indices = sorted(all_hit_rates.keys())
+    num_layers = len(layer_indices)
+    
+    # 获取head数量（从第一个可用的hit_rates数组中获取）
+    first_layer = layer_indices[0]
+    num_heads = len(all_hit_rates[first_layer])
+    
+    # 创建张量：形状为 (num_layers, num_heads)
+    hit_rates_tensor = torch.zeros(num_layers, num_heads)
+    
+    # 填充张量
+    for i, layer_idx in enumerate(layer_indices):
+        hit_rates = all_hit_rates[layer_idx]
+        hit_rates_tensor[i, :] = torch.tensor(hit_rates, dtype=torch.float32)
+    
+    # 保存张量
+    os.makedirs(output_dir, exist_ok=True)
+    tensor_save_path = os.path.join(output_dir, f"hit_rates_{model_type}_vs_{reference_data_type}_obs{observation_length}_top{topk}.pt")
+    
+    torch.save(hit_rates_tensor, tensor_save_path)
+    
+    print(f"Hit rates tensor saved to: {tensor_save_path}")
+    print(f"Tensor shape: {hit_rates_tensor.shape} (layers: {layer_indices})")
+
+def load_hit_rates_tensor(file_path):
+    """
+    加载保存的hit rates张量数据
+    
+    Args:
+        file_path: 张量文件路径
+        
+    Returns:
+        torch.Tensor: hit_rates_tensor 或 None 如果加载失败
+    """
+    try:
+        if not os.path.exists(file_path):
+            print(f"Error: File not found: {file_path}")
+            return None
+        
+        hit_rates_tensor = torch.load(file_path, map_location='cpu')
+        
+        print(f"Hit rates tensor loaded from: {file_path}")
+        print(f"Tensor shape: {hit_rates_tensor.shape}")
+        
+        return hit_rates_tensor
+        
+    except Exception as e:
+        print(f"Error loading tensor file: {e}")
+        return None
+
 def plot_distribution_comparison(base_dir, model_type, layer_idx, output_dir, observation_length=1024, topk=512):
     """绘制位置分布比较图"""
     
@@ -469,7 +536,7 @@ def parse_arguments():
     
     # 可选参数
     parser.add_argument('--base-dir', '-b', type=str,
-                        default='/home/yangx/ReasoningPathCompression/observation/topk_indices',
+                        default='/home/yangx/zmw/ReasoningPathCompression/observation/topk_indices',
                         help='数据文件的基础目录路径 (默认: %(default)s)')
     
     parser.add_argument('--output-dir', '-o', type=str,
@@ -623,6 +690,12 @@ if __name__ == "__main__":
     if len(all_hit_rates) > 1:
         plot_multi_layer_hit_rate_comparison(all_hit_rates, args.model, output_dir, 
                                            args.observation_length, args.topk, args.reference_data_type)
+    
+    # 将 all_hit_rates 转换为张量并保存
+    if all_hit_rates:
+        save_hit_rates_as_tensor(all_hit_rates, args.model, output_dir, 
+                                args.observation_length, args.topk, args.reference_data_type)
+
     
     print(f"\n完成! 成功处理了 {success_count}/{len(layers_to_plot)} 个层")
     print(f"所有图片已保存到: {output_dir}")
