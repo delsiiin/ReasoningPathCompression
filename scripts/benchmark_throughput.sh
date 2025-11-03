@@ -32,7 +32,7 @@ done
 # QwQ-32B with batch size 8
 for bsz in 8
 do
-    for ol in 1024 2048 4096 8192 16384
+    for ol in 1024 2048 4096 8192
     do  
         python -m benchmark.throughput \
         --model_path "Qwen/QwQ-32B" \
