@@ -267,7 +267,7 @@ def eager_attention_forward(
         
             save_tgt = torch.load(save_path)
 
-            zeros = torch.zeros(q_len, 548-1-kv_len, device=combined_logits.device, dtype=combined_logits.dtype) # 838 for qwq
+            zeros = torch.zeros(q_len, 456-1-kv_len, device=combined_logits.device, dtype=combined_logits.dtype) # 838 for qwq
 
             cur_tgt = torch.cat([combined_logits[0].mean(0), zeros], dim=1)
 
@@ -278,7 +278,7 @@ def eager_attention_forward(
 
         elif q_len != 1:
 
-            zeros = torch.zeros(q_len, 548-1-q_len, device=combined_logits.device, dtype=combined_logits.dtype) # 838 for qwq
+            zeros = torch.zeros(q_len, 456-1-q_len, device=combined_logits.device, dtype=combined_logits.dtype) # 838 for qwq
 
             save_tgt = torch.cat([combined_logits[0].mean(0), zeros], dim=1)
 
@@ -307,7 +307,7 @@ def eager_attention_forward(
         
             save_tgt = torch.load(save_path)
 
-            zeros = torch.zeros(q_len, 548-1-kv_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+            zeros = torch.zeros(q_len, 456-1-kv_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
 
             cur_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
 
@@ -318,7 +318,7 @@ def eager_attention_forward(
 
         elif q_len != 1:
 
-            zeros = torch.zeros(q_len, 548-1-q_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
+            zeros = torch.zeros(q_len, 456-1-q_len, device=attn_weights.device, dtype=attn_weights.dtype) # 838 for qwq
 
             save_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
 
