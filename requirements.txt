@@ -1,5 +1,7 @@
 torch==2.8.0
 transformers==4.55.0
+# GPT-OSS
+# transformers-v4.55.0-GLM-4.5V-preview==4.56.0.dev0
 fire==0.7.0
 accelerate==1.0.1
 
@@ -28,3 +30,5 @@ immutabledict
 nltk
 
 flash_attn==2.7.4.post1
+
+git+https://github.com/triton-lang/triton.git@main#subdirectory=python/triton_kernels
