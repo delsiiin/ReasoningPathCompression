@@ -38,6 +38,8 @@ fi
 echo "使用模型: $MODEL"
 echo "生成Layer $START_LAYER 到 $END_LAYER 的step-wise attention热力图..."
 
+python plot_dual_layer_attn_map.py --tokenizer_name "$TOKENIZER_NAME" --attn_dir "$ATTN_DIR" --output_dir "$OUTPUT_DIR" --verbose --skip_answer --vmax $VMAX
+
 for layer in $(seq $START_LAYER $END_LAYER); do
     echo "处理Layer $layer..."
     python plot_step_wise_attn_map.py --tokenizer_name "$TOKENIZER_NAME" --attn_dir "$ATTN_DIR" --output_dir "$OUTPUT_DIR" --layer_id $layer --verbose --skip_answer --vmax $VMAX
