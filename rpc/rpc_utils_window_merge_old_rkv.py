@@ -105,6 +105,7 @@ class RPCCluster():
         self.cached_prompt = None
         self.cached_recent = None
         self.threshold = None
+        self.threshold_token = None  # 第二个EMA阈值，用于token级别的相似度
 
         # support gqa
         self.aggregation = aggregation
@@ -353,56 +354,105 @@ class RPCCluster():
                 # 计算语义相似度（余弦相似度）
                 k_hh_pruned_norm = k_hh_pruned / torch.norm(k_hh_pruned, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)
                 k_hh_recent_norm = k_hh_recent / torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)
-                semantic_similarity = k_hh_pruned_norm @ k_hh_recent_norm.transpose(-1, -2)
-                
-                # 获取pruned和recent token的原始位置索引
-                pruned_positions = torch.arange(target_key_states.shape[2], device=target_key_states.device)[~mask[0, 0]]  # 被剪枝token的位置
-                recent_positions = torch.arange(target_key_states.shape[2], device=target_key_states.device)[mask[0, 0]]   # 保留token的位置
-                
-                # 计算位置权重：允许左右双向合并，并考虑距离
-                # 形状: (num_pruned, num_recent)
-                position_diff = recent_positions.unsqueeze(0) - pruned_positions.unsqueeze(1)  # recent - pruned
-                
-                # 允许左右双向合并：计算绝对距离
-                abs_position_diff = torch.abs(position_diff.float())
-                
-                # 距离权重：距离越近权重越高（主要权重）
-                distance_weights = torch.exp(-0.1 * abs_position_diff)  # 基于绝对距离的权重
-                
-                # 综合权重：距离权重为主导因子
-                position_weights = distance_weights 
 
-                # 应用位置权重到语义相似度
-                # 将位置权重扩展到所有batch和head维度
-                position_weights_expanded = position_weights.unsqueeze(0).unsqueeze(0).expand(bsz, num_heads, -1, -1)
+                # 根据step_lens在k_hh_recent_norm中对每个step求centroid
+                step_start_indices = [0]
+                for length in step_lens[:-1]:  # 除最后一个step外
+                    step_start_indices.append(step_start_indices[-1] + length)
                 
-                # 最终相似度 = 语义相似度 * 位置权重
-                similarity = semantic_similarity * position_weights_expanded
-                similarity = similarity.to(k_hh_recent.dtype)
+                centroids = []
+                for i in range(len(step_lens)):  # 包括所有step
+                    start_idx = step_start_indices[i] if i < len(step_start_indices) else step_start_indices[-1]
+                    end_idx = start_idx + step_lens[i]
+                    # 在最后一维求均值得到centroid
+                    step_centroid = k_hh_recent_norm[:, :, start_idx:end_idx, :].mean(dim=2, keepdim=True)
+                    centroids.append(step_centroid)
                 
-                # similarity = k_hh_pruned @ k_hh_recent.transpose(-1, -2) # dot product
-                # similarity = (k_hh_pruned / torch.norm(k_hh_pruned, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)) @ ((k_hh_recent / (torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim))).transpose(-1, -2)) # cosin
+                # 拼接所有centroids: (bsz, num_heads, n_steps, head_dim)
+                centroids = torch.cat(centroids, dim=2)
 
+                # 计算k_hh_pruned_norm与centroids的相似度
+                # k_hh_pruned_norm: (bsz, num_heads, n_pruned, head_dim)
+                # centroids: (bsz, num_heads, n_steps, head_dim)
+                # similarity_to_centroids: (bsz, num_heads, n_pruned, n_steps)
+                similarity_to_centroids = k_hh_pruned_norm @ centroids.transpose(-1, -2)
+                similarity_to_centroids = similarity_to_centroids.to(k_hh_recent.dtype)
 
-                max_values, max_indices = similarity.max(dim=-1)
-                # breakpoint()   
+                max_values, max_indices = similarity_to_centroids.max(dim=-1)  # (bsz, num_heads, n_pruned)
+
+                # 根据EMA阈值统计大于阈值数量最多的一个step
+                # 首先需要设定一个阈值用于判断
                 if self.threshold == None:
+                    # 初始化阈值为相似度的平均值
                     self.threshold = max_values.mean()
                 else:
-                    # self.threshold = (self.threshold + max_values.mean()) / 2
-                    # breakpoint()
-                    self.threshold = 0.3 * self.threshold + 0.7 * max_values.mean()  # 0.3 0.7
-                filter_indices = (max_values.mean(1)>=self.threshold).squeeze(0)
-                merged_indices = max_indices[..., filter_indices].unsqueeze(-1).repeat(1, 1, 1, head_dim)
-                merge_weights = max_values[..., filter_indices].unsqueeze(-1).repeat(1, 1, 1, head_dim)
+                    # 使用EMA更新阈值
+                    self.threshold = 0.3 * self.threshold + 0.7 * max_values.mean()
+                
+                # 对每个step统计大于阈值的token数量
+                # (bsz, num_heads, n_pruned, n_steps) -> (bsz, n_steps)
+                above_threshold = (similarity_to_centroids > self.threshold).float().mean(dim=1).sum(dim=1)
+                
+                # 找到数量最多的step索引
+                most_similar_step_idx = above_threshold.argmax(dim=-1)  # (bsz,)
+                
+                # 提取最相似step在k_hh_recent中的token
+                # 计算每个pruned token与该step中所有token的相似度，然后进行合并
+                for b in range(bsz):
+                    step_idx = most_similar_step_idx[b].item()
+                    start_idx = step_start_indices[step_idx] if step_idx < len(step_start_indices) else step_start_indices[-1]
+                    end_idx = start_idx + step_lens[step_idx]
+                    
+                    # 提取该step的所有token: (num_heads, step_len, head_dim)
+                    step_tokens = k_hh_recent_norm[b, :, start_idx:end_idx, :]
+                    
+                    # 计算pruned token与该step中所有token的相似度
+                    # (num_heads, n_pruned, head_dim) @ (num_heads, head_dim, step_len) -> (num_heads, n_pruned, step_len)
+                    similarity_to_step_tokens = k_hh_pruned_norm[b] @ step_tokens.transpose(-1, -2)
+                    similarity_to_step_tokens = similarity_to_step_tokens.to(k_hh_recent.dtype)
 
-                k_hh_merged = k_hh_pruned[..., filter_indices, :]
-                k_hh_recent = torch.scatter_reduce(input=k_hh_recent, dim=2, index=merged_indices, src=merge_weights*k_hh_merged, reduce='mean', include_self=True)
-            
-                v_hh_merged = v_hh_pruned[..., filter_indices, :]
-                v_hh_recent = torch.scatter_reduce(input=v_hh_recent, dim=2, index=merged_indices, src=merge_weights*v_hh_merged, reduce='mean', include_self=True)
-        
-
+                    # 对每个pruned token找到最相似的step token
+                    max_values, max_indices = similarity_to_step_tokens.max(dim=-1)  # (num_heads, n_pruned)
+                    
+                    # 使用第二个EMA阈值
+                    if self.threshold_token is None:
+                        # 初始化第二个阈值为token级别相似度的平均值
+                        self.threshold_token = max_values.mean()
+                    else:
+                        # 使用EMA更新第二个阈值
+                        self.threshold_token = 0.3 * self.threshold_token + 0.7 * max_values.mean()
+                    
+                    # 筛选相似度大于第二个阈值的token
+                    filter_mask = max_values.mean(0) >= self.threshold_token  # (n_pruned,)
+                    
+                    if filter_mask.sum().item() > 0:
+                        # 将相对索引转换为绝对索引
+                        absolute_indices = max_indices[:, filter_mask] + start_idx  # (num_heads, n_filtered)
+                        merged_indices = absolute_indices.unsqueeze(-1).repeat(1, 1, head_dim)  # (num_heads, n_filtered, head_dim)
+                        
+                        # 提取对应的权重和k/v
+                        merge_weights = max_values[:, filter_mask].unsqueeze(-1).repeat(1, 1, head_dim)  # (num_heads, n_filtered, head_dim)
+                        k_hh_merged = k_hh_pruned[b, :, filter_mask, :]  # (num_heads, n_filtered, head_dim)
+                        v_hh_merged = v_hh_pruned[b, :, filter_mask, :]  # (num_heads, n_filtered, head_dim)
+                        
+                        # 执行合并操作
+                        k_hh_recent[b:b+1] = torch.scatter_reduce(
+                            input=k_hh_recent[b:b+1], 
+                            dim=2, 
+                            index=merged_indices.unsqueeze(0), 
+                            src=merge_weights.unsqueeze(0) * k_hh_merged.unsqueeze(0), 
+                            reduce='mean', 
+                            include_self=True
+                        )
+                        
+                        v_hh_recent[b:b+1] = torch.scatter_reduce(
+                            input=v_hh_recent[b:b+1], 
+                            dim=2, 
+                            index=merged_indices.unsqueeze(0), 
+                            src=merge_weights.unsqueeze(0) * v_hh_merged.unsqueeze(0), 
+                            reduce='mean', 
+                            include_self=True
+                        )
         
         # support gqa
         if self.aggregation == 'all' or 'group':
