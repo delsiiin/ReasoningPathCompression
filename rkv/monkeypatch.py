@@ -11,6 +11,9 @@ from .modeling import (
     CausalLM_forward,
 )
 
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from .flash_attn.flash_attention import flash_attention_forward
+
 def replace_llama(compression_config):
     def init_wrapper(self, config, layer_idx):
         LlamaAttention_init(self, config, layer_idx, compression_config)
@@ -19,6 +22,7 @@ def replace_llama(compression_config):
     modeling_llama.LlamaAttention.forward = LlamaAttention_forward
     modeling_llama.LlamaForCausalLM.forward = CausalLM_forward
 
+    ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = flash_attention_forward
 
 def replace_qwen2(compression_config):
     def init_wrapper(self, config, layer_idx):
@@ -28,6 +32,8 @@ def replace_qwen2(compression_config):
     modeling_qwen2.Qwen2Attention.forward = Qwen2Attention_forward
     modeling_qwen2.Qwen2ForCausalLM.forward = CausalLM_forward
 
+    ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = flash_attention_forward
+
 def replace_qwen3(compression_config):
     def init_wrapper(self, config, layer_idx):
         Qwen3Attention_init(self, config, layer_idx, compression_config)
@@ -35,3 +41,5 @@ def replace_qwen3(compression_config):
     modeling_qwen3.Qwen3Attention.__init__ = init_wrapper
     modeling_qwen3.Qwen3Attention.forward = Qwen3Attention_forward
     modeling_qwen3.Qwen3ForCausalLM.forward = CausalLM_forward
+
+    ALL_ATTENTION_FUNCTIONS["flash_attention_2"] = flash_attention_forward
