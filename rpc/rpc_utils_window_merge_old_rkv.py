@@ -146,23 +146,22 @@ class RPCCluster():
         row_col_sum = col_sum_accu.mean(dim=1) #NOT SURE IF THIS IS CORRECT, NEED TO CHECK
         # print(row_col_sum.shape, "row_col_sum")
         
-        # 根据step_lens对每个分区在row_col_sum的最后一维求和，累计除最后一段的其他step
+            # 根据step_lens对每个分区在row_col_sum的最后一维求和，累计除最后一段的其他step
         if step_lens is not None:
             # start_time = time.time()
             # print(step_lens, "step_lens")
-            # 根据step长度计算每个step的起始索引
-            step_start_indices = [0]
-            for length in step_lens[:-1]:  # 除最后一个step外
-                step_start_indices.append(step_start_indices[-1] + length)
+            # 使用向量化计算step起始索引
+            step_lens_tensor = torch.tensor(step_lens[:-1], device=row_col_sum.device)
+            step_start_indices = torch.cat([torch.zeros(1, dtype=torch.long, device=row_col_sum.device), 
+                                           torch.cumsum(step_lens_tensor, dim=0)])
             
+            # 向量化计算所有step的partition_sum
             partitioned_sums = []
-            # 只处理除最后一个step之外的所有step
             for i in range(len(step_lens) - 1):  # 排除最后一个step
-                start_idx = step_start_indices[i]
-                end_idx = step_start_indices[i] + step_lens[i]
-                partition_sum = row_col_sum[..., start_idx:end_idx].sum(dim=-1).mean(dim=1).unsqueeze(1)  # 计算每个分区的和并保持维度
+                start_idx = step_start_indices[i].item()
+                end_idx = (step_start_indices[i] + step_lens[i]).item() if isinstance(step_lens[i], int) else (step_start_indices[i] + step_lens[i]).item()
+                partition_sum = row_col_sum[..., start_idx:end_idx].sum(dim=-1).mean(dim=1).unsqueeze(1)
                 partitioned_sums.append(partition_sum)
-                # print(partition_sum.shape, "partition_sum")
             step_scores = torch.cat(partitioned_sums, dim=-1)  # 形状: (bsz, n_steps-1) 排除最后一个step
             # print(step_scores, "step_scores")
             # 在step级别取topk，现在k_steps应该基于排除最后一个step后的数量
@@ -172,17 +171,23 @@ class RPCCluster():
             # if self.layer_idx == 0:
             #     print(step_lens, "step_lens")
             
-            # 将step索引映射回原始序列索引
+            # 将step索引映射回原始序列索引 - 向量化处理
             selected_indices = []
             for batch_idx in range(topk_step_indices.size(0)):
+                # 获取该batch的所有step索引
+                batch_step_indices = topk_step_indices[batch_idx]  # (k_steps,)
+                # 向量化获取起始和结束位置
+                start_positions = step_start_indices[batch_step_indices]
+                step_lengths = torch.tensor([step_lens[idx.item()] for idx in batch_step_indices], 
+                                           device=row_col_sum.device)
+                end_positions = start_positions + step_lengths
+                
+                # 生成所有token索引
                 batch_indices = []
-                for step_idx in topk_step_indices[batch_idx]:
-                    step_idx = step_idx.item()  # 只在需要时提取单个值
-                    start_pos = step_start_indices[step_idx]
-                    end_pos = start_pos + step_lens[step_idx]
-                    # 在该step内选择所有token，保持在GPU上
-                    step_token_indices = torch.arange(start_pos, end_pos, device=row_col_sum.device)
-                    # print(step_token_indices, "step_token_indices")
+                for i in range(len(batch_step_indices)):
+                    step_token_indices = torch.arange(start_positions[i].item(), 
+                                                     end_positions[i].item(), 
+                                                     device=row_col_sum.device)
                     batch_indices.append(step_token_indices)
                 selected_indices.append(torch.cat(batch_indices))
 
@@ -234,26 +239,30 @@ class RPCCluster():
                 # 计算每个历史 token 的分数：此处保留 head 维度，稍后再做聚合
                 # token_scores 形状: (bsz, n_head, L)
                 token_scores = col_sum_accu.sum(dim = -2)
+                device = token_scores.device
 
                 # 根据 topk_step_values 对 token_scores 进行加权
                 # 创建一个与 token_scores 形状匹配的权重张量
                 step_weights_expanded = torch.ones_like(token_scores)
-                step_start_indices = [0]
-                for length in step_lens[:-1]:  # 除最后一个step外
-                    step_start_indices.append(step_start_indices[-1] + length)
+                # 使用向量化计算step起始索引
+                step_lens_tensor = torch.tensor(step_lens[:-1], device=device)
+                step_start_indices_tensor = torch.cat([torch.zeros(1, dtype=torch.long, device=device), 
+                                                       torch.cumsum(step_lens_tensor, dim=0)])
+                
+                # 向量化处理权重分配
                 for batch_idx in range(bsz):
-                    for step_idx, step_value in enumerate(topk_step_values[batch_idx]):
-                        step_idx_item = step_idx
-                        start_pos = step_start_indices[step_idx_item]
-                        end_pos = start_pos + step_lens[step_idx_item]
-                        # 将该 step 的权重应用到对应的 token 范围
-                        step_weights_expanded[batch_idx, :, start_pos:end_pos] = step_value.item()
+                    for step_idx in range(len(topk_step_values[batch_idx])):
+                        start_pos = step_start_indices_tensor[step_idx].item()
+                        end_pos = start_pos + step_lens[step_idx]
+                        step_value = topk_step_values[batch_idx, step_idx]
+                        # 使用切片和广播一次性赋值
+                        step_weights_expanded[batch_idx, :, start_pos:end_pos] = step_value
                 
                 # 应用权重
                 token_scores = token_scores * step_weights_expanded
 
                 bsz, n_head, L = token_scores.shape
-                device = token_scores.device
+                
                 dtype = token_scores.dtype
 
                 if self.aggregation == 'all':
@@ -356,13 +365,15 @@ class RPCCluster():
                 k_hh_recent_norm = k_hh_recent / torch.norm(k_hh_recent, dim=-1).unsqueeze(-1).repeat(1, 1, 1, head_dim)
 
                 # 根据step_lens在k_hh_recent_norm中对每个step求centroid
-                step_start_indices = [0]
-                for length in step_lens[:-1]:  # 除最后一个step外
-                    step_start_indices.append(step_start_indices[-1] + length)
+                # 使用向量化计算step起始索引（只计算一次，后续复用）
+                step_lens_tensor = torch.tensor(step_lens, device=k_hh_recent_norm.device)
+                step_start_indices_all = torch.cat([torch.zeros(1, dtype=torch.long, device=k_hh_recent_norm.device), 
+                                                    torch.cumsum(step_lens_tensor[:-1], dim=0)])
                 
+                # 向量化计算所有centroids
                 centroids = []
                 for i in range(len(step_lens)):  # 包括所有step
-                    start_idx = step_start_indices[i] if i < len(step_start_indices) else step_start_indices[-1]
+                    start_idx = step_start_indices_all[i].item()
                     end_idx = start_idx + step_lens[i]
                     # 在最后一维求均值得到centroid
                     step_centroid = k_hh_recent_norm[:, :, start_idx:end_idx, :].mean(dim=2, keepdim=True)
@@ -396,11 +407,11 @@ class RPCCluster():
                 # 找到数量最多的step索引
                 most_similar_step_idx = above_threshold.argmax(dim=-1)  # (bsz,)
                 
-                # 提取最相似step在k_hh_recent中的token
+                # 提取最相似step在k_hh_recent中的token（复用step_start_indices_all）
                 # 计算每个pruned token与该step中所有token的相似度，然后进行合并
                 for b in range(bsz):
                     step_idx = most_similar_step_idx[b].item()
-                    start_idx = step_start_indices[step_idx] if step_idx < len(step_start_indices) else step_start_indices[-1]
+                    start_idx = step_start_indices_all[step_idx].item()
                     end_idx = start_idx + step_lens[step_idx]
                     
                     # 提取该step的所有token: (num_heads, step_len, head_dim)
