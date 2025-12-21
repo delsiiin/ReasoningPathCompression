@@ -153,6 +153,7 @@ def measure_throughput(
 
 
     results_list = []
+    time_list = []  # Store time for each run in seconds
 
     for i in range(num_runs):
         print(f"Test Run #{i}")
@@ -181,6 +182,7 @@ def measure_throughput(
             
         throughput = batch_size * output_len / (total_time / 1000)
         results_list.append(throughput)
+        time_list.append(total_time / 1000)  # Convert to seconds
 
         print(f"Generated IDs length: {generated_ids.shape}")
 
@@ -188,6 +190,7 @@ def measure_throughput(
         cleanup_memory()
 
     avg_throughput = average_excluding_min_max(results_list)
+    avg_time = average_excluding_min_max(time_list)  # Average time in seconds
 
     total_max_memory = 0
     for i in range(num_gpus):
@@ -217,11 +220,12 @@ def measure_throughput(
     results_text.append(f"  Number of Warm Up Runs: {num_warmups}")
     results_text.append(f"  Number of Test Runs: {num_runs}")
     results_text.append(f"")
-    results_text.append(f"Individual Run Results (tokens/sec):")
-    for i, throughput in enumerate(results_list):
-        results_text.append(f"  Run {i+1}: {throughput:.2f}")
+    results_text.append(f"Individual Run Results:")
+    for i, (throughput, run_time) in enumerate(zip(results_list, time_list)):
+        results_text.append(f"  Run {i+1}: {throughput:.2f} tokens/sec, {run_time:.2f} seconds")
     results_text.append(f"")
     results_text.append(f"Average Throughput (tokens/sec): {avg_throughput:.2f}")
+    results_text.append(f"Average Time per Run (seconds): {avg_time:.2f}")
     results_text.append(f"Peak GPU Memory: {total_max_memory / 1000**2 / 1000:.2f} GB")
     results_text.append("=" * 60)
 
@@ -251,6 +255,7 @@ def measure_throughput(
     print(f"Input Length={input_len}, Output Length={output_len}")
     print(f"Number of Warm Up Runs={num_warmups}, Number of Test Runs={num_runs}")
     print(f"Average Throughput (tokens/sec)={avg_throughput:.2f}")
+    print(f"Average Time per Run (seconds)={avg_time:.2f}")
     print(f"Peak GPU Memory: {total_max_memory / 1000**2 / 1000:.2f} GB\n")
 
 
