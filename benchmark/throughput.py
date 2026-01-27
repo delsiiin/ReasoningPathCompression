@@ -8,6 +8,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from rpc import enable_rpc, set_rpc_config
 
+from rkv.monkeypatch import replace_llama, replace_qwen2
+
 # from utils.qwen2_norepeat import qwen2_flashattention2_norepeat_forward
 
 # def monkeypatch():
@@ -53,11 +55,17 @@ def average_excluding_min_max(numbers):
 def measure_throughput(
     model_path: str = "Qwen/QwQ-32B",
     rpc: bool = False,
+    rkv: bool = False,
     # RPC arguments
+    rpc_mode: str = 'ours_window_merge_rkv',
+    rpc_budget: int = 1024,
     P: int = 1024,
     R: int = 32,
     c: int = 4,
     selectors: str = 'recent',
+    # RKV arguments
+    rkv_mode: str = 'rkv',
+    rkv_budget: int = 1024,
     # experiment arguments
     batch_size: int = 16,
     input_len: int = 128,
@@ -86,20 +94,163 @@ def measure_throughput(
 
     attn_implementation = 'flash_attention_2'
     if rpc:
-        enable_rpc()
-        
-    else:
-        pass
-        # monkeypatch()
+        enable_rpc(rpc_mode)
+    
+    if rkv:
+        # ====== build compression config ======
+        compression_config = {
+            "method": rkv_mode,
+            "method_config": {
+                "budget": rkv_budget,
+                "window_size": 8,
+                "mix_lambda": 0.07,
+                "retain_ratio": 0.2,
+                "retain_direction": "last",
+                "first_tokens": 4,
+                "mode": "none",
+            },
+            "compression": None,
+            "update_kv": True
+        }
+        model_config = {
+            "divide_method": "step_length",
+            "divide_length": 128,
+            "compression_content": "think",
+            "method": rkv_mode,
+            "mode": "none",
+            "observation_length": None,
+            "observation_topk": None,
+        }
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        low_cpu_mem_usage=True,
-        attn_implementation=attn_implementation,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, use_fast=True, padding_side="left"
+        )
+
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+        # apply monkey patch
+        if "llama" in model_path.lower():
+            replace_llama(compression_config)
+        elif "qwen" in model_path.lower():
+            replace_qwen2(compression_config)
+        else:
+            raise ValueError(f"Unsupported model: {model_path}")
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            use_cache=True,
+            attn_implementation=attn_implementation,
+            device_map="auto"
+        )
+        model.eval()
+
+        model.config.update(model_config)
+
+        model.newline_token_ids = [
+            tokenizer.encode("\n")[-1],
+            tokenizer.encode(".\n")[-1],
+            tokenizer.encode(")\n")[-1],
+            tokenizer.encode("\n\n")[-1],
+            tokenizer.encode(".\n\n")[-1],
+            tokenizer.encode(")\n\n")[-1],
+        ]
+
+        model.after_think_token_ids = [
+            tokenizer.encode("</think>")[-1],
+        ]
+
+    elif rpc:
+
+        if "distill-qwen" in model_path.lower() or "qwq" in model_path.lower():
+            from rpc.qwen2.qwen2_config import Qwen2Config
+            from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
+            config = Qwen2Config.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = Qwen2ForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+        elif "qwen3" in model_path.lower():
+            from rpc.qwen3.qwen3_config import Qwen3MoeConfig
+            from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeForCausalLM
+            config = Qwen3MoeConfig.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = Qwen3MoeForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+        elif "gpt" in model_path.lower():
+            from rpc.gpt_oss.gpt_oss_config import GptOssConfig
+            from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
+            config = GptOssConfig.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = GptOssForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+        elif "llama" in model_path.lower():
+            from rpc.llama.llama_config import LlamaConfig
+            from transformers.models.llama.modeling_llama import LlamaForCausalLM
+            config = LlamaConfig.from_pretrained(model_path)
+            config.update({'rpc_mode':rpc_mode})
+
+            model = LlamaForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                attn_implementation=attn_implementation,
+                config=config,
+                device_map="auto"
+            )
+    
+        model.eval()
+
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+        model.newline_token_ids = [
+            tokenizer.encode("\n")[-1],
+            tokenizer.encode(".\n")[-1],
+            tokenizer.encode(")\n")[-1],
+            tokenizer.encode("\n\n")[-1],
+            tokenizer.encode(".\n\n")[-1],
+            tokenizer.encode(")\n\n")[-1],
+        ]
+
+        model.CoT_done_token_ids = [
+            tokenizer.encode("</think>")[-1],
+        ]
+
+    else:
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            attn_implementation=attn_implementation,
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+
     tokenizer.padding_side = 'left'
     
     # Ensure pad_token is set for generation
@@ -114,7 +265,9 @@ def measure_throughput(
                             selectors=selectors,
                             aggregation='all',
                             kernel_size=7,
-                            pooling='avgpool'                            
+                            pooling='avgpool',
+                            budget_cot=rpc_budget,
+                            mode=rpc_mode                            
                             )
 
     # Input Sequence      
