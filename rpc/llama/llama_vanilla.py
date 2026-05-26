@@ -189,7 +189,7 @@ def eager_attention_forward(
     if "step_heatmap" in module.config.mode:
 
             import os
-            folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/attn_heat_map_step/llama3'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map_step/llama3'
             os.makedirs(folder_path, exist_ok=True)
 
             # 设置保存路径
@@ -204,7 +204,7 @@ def eager_attention_forward(
             
                 save_tgt = torch.load(save_path)
 
-                zeros = torch.zeros(q_len, 594-1-kv_len, device=attn_weights.device, dtype=attn_weights.dtype)
+                zeros = torch.zeros(q_len, 3966-1-kv_len, device=attn_weights.device, dtype=attn_weights.dtype)
 
                 cur_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
 
@@ -215,7 +215,7 @@ def eager_attention_forward(
 
             elif q_len != 1:
 
-                zeros = torch.zeros(q_len, 594-1-q_len, device=attn_weights.device, dtype=attn_weights.dtype)
+                zeros = torch.zeros(q_len, 3966-1-q_len, device=attn_weights.device, dtype=attn_weights.dtype)
 
                 save_tgt = torch.cat([attn_weights[0].mean(0), zeros], dim=1)
 
@@ -228,7 +228,7 @@ def eager_attention_forward(
     if "token_heatmap" in module.config.mode:
 
             import os
-            folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/attn_heat_map_token/llama3'
+            folder_path = '/home/yangx/ReasoningPathCompression/observation/attn_heat_map_token/llama3'
             os.makedirs(folder_path, exist_ok=True)
 
             # 设置保存路径
@@ -400,7 +400,7 @@ class LlamaAttention(nn.Module):
                         indices = attn_cache.topk(self.config.observation_topk, dim=-1, largest=True).indices.sort(dim=-1).values 
                         
                         # Create directory if it doesn't exist
-                        folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/topk_indices/llama3/induced'
+                        folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3/induced'
                         import os 
                         os.makedirs(folder_path, exist_ok=True)
 
@@ -442,7 +442,7 @@ class LlamaAttention(nn.Module):
 
                 # Create directory if it doesn't exist
                 import os
-                folder_path = '/home/yangx/zmw/ReasoningPathCompression/observation/topk_indices/llama3/continue_gen'
+                folder_path = '/home/yangx/ReasoningPathCompression/observation/topk_indices/llama3/continue_gen'
                 os.makedirs(folder_path, exist_ok=True)
 
                 # Save indices to file
@@ -675,15 +675,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # Calculate information entropy of logits over vocabulary
         if "entropy" in self.config.mode:
             import torch.nn.functional as F
-            
-            # Apply softmax to get probabilities
-            probs = F.softmax(logits, dim=-1)
-            
-            # Calculate entropy: H = -sum(p * log(p))
-            # Add small epsilon to avoid log(0)
-            epsilon = 1e-8
-            log_probs = torch.log(probs + epsilon)
-            entropy = -torch.sum(probs * log_probs, dim=-1)
+
+            log_probs = F.log_softmax(logits[:, -1:, :].float(), dim=-1)
+            probs = log_probs.exp()
+            entropy = -(probs * log_probs).sum(dim=-1)
             
             import os
             folder_path = '/home/yangx/ReasoningPathCompression/observation/token_entropy/llama3'
@@ -692,10 +687,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
             # Check if file exists and concatenate or create new
             if os.path.exists(save_path):
-                existing_entropy = torch.load(save_path)
+                existing_entropy = torch.load(save_path, map_location=entropy.device)
+                existing_entropy = existing_entropy.to(device=entropy.device, dtype=torch.float32)
                 entropy = torch.cat([existing_entropy, entropy], dim=-1)
 
-            torch.save(entropy, save_path)
+            torch.save(entropy.float().cpu(), save_path)
 
         if "confidence" in self.config.mode:
             import torch.nn.functional as F

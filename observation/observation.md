@@ -21,8 +21,19 @@ python draw_heat_map.py --model llama3 --num_layers 32
 ## Generate Step-wise Attention Map
 ./run_plot_step_wise_attn_map.sh llama3 0 31 0.1
 
-## Generate Token Entropy
+## Generate Token (Step) Entropy
 ./run_plot_token_entropy.sh llama
+./run_plot_token_entropy.sh qwen2
+./run_plot_token_entropy.sh qwen3
+./run_plot_token_entropy.sh oss
+
+python observation/build_step_entropy_app.py \
+  --model_type llama3 \
+  --serve --host 127.0.0.1 --port 8765 --skip_answer
+
+python observation/build_step_entropy_app.py --model_type qwen2 --serve --port 8766
+python observation/build_step_entropy_app.py --model_type qwen3 --serve --port 8767
+python observation/build_step_entropy_app.py --model_type oss --serve --port 8768
 
 ## Generate Token Confidence
 ./run_plot_token_confidence.sh llama
@@ -34,6 +45,7 @@ python draw_heat_map.py --model llama3 --num_layers 32
 ## Generate Token Entropy Using Entropy Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode entropy --rkv_budget 1024
 ./run_plot_token_entropy.sh llama h2o
+./run_plot_token_entropy.sh qwen2 h2o
 
 ## Generate Token Confidence Using Confidence Mode
 CUDA_VISIBLE_DEVICES=0 python example.py --max_new_tokens 4096 --rkv True --rkv_mode h2o --mode confidence --rkv_budget 1024

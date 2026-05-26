@@ -32,6 +32,49 @@ class ModelStopCriteria(StoppingCriteria):
         return False
 
 
+def get_newline_token_ids(tokenizer):
+    return [
+        tokenizer.encode("\n")[-1],
+        tokenizer.encode(".\n")[-1],
+        tokenizer.encode(")\n")[-1],
+        tokenizer.encode("\n\n")[-1],
+        tokenizer.encode(".\n\n")[-1],
+        tokenizer.encode(")\n\n")[-1],
+    ]
+
+
+def get_model_family(model_path):
+    model_path = model_path.lower()
+    if "qwen3" in model_path:
+        return "qwen3"
+    if "distill-qwen" in model_path or "qwq" in model_path or "qwen2" in model_path:
+        return "qwen2"
+    if "llama" in model_path:
+        return "llama3"
+    if "gpt" in model_path or "oss" in model_path:
+        return "oss"
+    return "unknown"
+
+
+def set_observation_tokens(model, tokenizer):
+    model.newline_token_ids = get_newline_token_ids(tokenizer)
+
+
+def build_output_data(model, model_path, outputs, context_length, output_length, decoded_output):
+    data = {
+        "context_length": context_length,
+        "output_length": output_length,
+        "decoded_output": decoded_output,
+        "model_family": get_model_family(model_path),
+    }
+
+    if hasattr(model, "newline_token_ids"):
+        data["generated_token_ids"] = outputs[0][context_length:].detach().cpu().tolist()
+        data["newline_token_ids"] = [int(token_id) for token_id in model.newline_token_ids]
+
+    return data
+
+
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-7B"
 # "/home/yangx/QwQ-32B"
 # "/home/yangx/DeepSeek-R1-Distill-Qwen-1.5B"
@@ -117,6 +160,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             "divide_length": 128,
             "compression_content": "think",
             "method": rkv_mode,
+            "model_family": get_model_family(model_path),
             "mode": mode,
             "observation_length": observation_length,
             "observation_topk": observation_topk,
@@ -150,14 +194,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
         model.config.update(model_config)
 
-        model.newline_token_ids = [
-            tokenizer.encode("\n")[-1],
-            tokenizer.encode(".\n")[-1],
-            tokenizer.encode(")\n")[-1],
-            tokenizer.encode("\n\n")[-1],
-            tokenizer.encode(".\n\n")[-1],
-            tokenizer.encode(")\n\n")[-1],
-        ]
+        model.newline_token_ids = get_newline_token_ids(tokenizer)
 
         model.after_think_token_ids = [
             tokenizer.encode("</think>")[-1],
@@ -226,14 +263,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-        model.newline_token_ids = [
-            tokenizer.encode("\n")[-1],
-            tokenizer.encode(".\n")[-1],
-            tokenizer.encode(")\n")[-1],
-            tokenizer.encode("\n\n")[-1],
-            tokenizer.encode(".\n\n")[-1],
-            tokenizer.encode(")\n\n")[-1],
-        ]
+        model.newline_token_ids = get_newline_token_ids(tokenizer)
 
         model.CoT_done_token_ids = [
             tokenizer.encode("</think>")[-1],
@@ -350,6 +380,8 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
             )
 
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    set_observation_tokens(model, tokenizer)
     
     streamer = TextStreamer(tokenizer)
 
@@ -384,15 +416,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
     if generate_rounds:
         
-        stop_ids = [
-                    tokenizer.encode("\n")[-1],
-                    tokenizer.encode(".\n")[-1],
-                    tokenizer.encode(")\n")[-1],
-                    tokenizer.encode("\n\n")[-1],
-                    tokenizer.encode(".\n\n")[-1],
-                    tokenizer.encode(")\n\n")[-1],
-                    tokenizer.eos_token_id
-                ]
+        stop_ids = get_newline_token_ids(tokenizer) + [tokenizer.eos_token_id]
 
         past_key_values = DynamicCache()
         first_round = True
@@ -555,12 +579,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
 
 
     if rkv_mode and mode != "record_indices" and mode != "induce_answer" and mode != "gen_w_inducer":
-        # Create data dictionary
-        data = {
-            "context_length": context_length,
-            "output_length": output_length,
-            "decoded_output": decoded_output
-        }
+        data = build_output_data(model, model_path, outputs, context_length, output_length, decoded_output)
 
         # Create directory if it doesn't exist and save to JSONL file
         import os
@@ -574,12 +593,7 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         print(f"Output Length: {output_length}\n")
 
     elif rpc_mode and mode != "record_indices" and mode != "induce_answer" and mode != "gen_w_inducer":
-        # Create data dictionary
-        data = {
-            "context_length": context_length,
-            "output_length": output_length,
-            "decoded_output": decoded_output
-        }
+        data = build_output_data(model, model_path, outputs, context_length, output_length, decoded_output)
         
         # Create directory if it doesn't exist and save to JSONL file
         import os
@@ -596,16 +610,11 @@ def gen_example(model_path: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         print(f"\nContext Length: {context_length}")
         print(f"Output Length: {output_length}\n")
     else:
-        # Create data dictionary
-        data = {
-            "context_length": context_length,
-            "output_length": output_length,
-            "decoded_output": decoded_output
-        }
+        data = build_output_data(model, model_path, outputs, context_length, output_length, decoded_output)
 
         # Create directory if it doesn't exist and save to JSONL file
         import os
-        output_dir = "/home/yangx/zmw/ReasoningPathCompression/observation"
+        output_dir = "/home/yangx/ReasoningPathCompression/observation"
         os.makedirs(output_dir, exist_ok=True)
 
         with open(f"{output_dir}/output.jsonl", "w", encoding="utf-8") as f:

@@ -647,27 +647,24 @@ def CausalLM_forward(
     # Calculate information entropy of logits over vocabulary
     if hasattr(self.config, 'mode') and "entropy" in self.config.mode:
         import torch.nn.functional as F
-        
-        # Apply softmax to get probabilities
-        probs = F.softmax(logits, dim=-1)
-        
-        # Calculate entropy: H = -sum(p * log(p))
-        # Add small epsilon to avoid log(0)
-        epsilon = 1e-8
-        log_probs = torch.log(probs + epsilon)
-        entropy = -torch.sum(probs * log_probs, dim=-1)
+
+        log_probs = F.log_softmax(logits[:, -1:, :].float(), dim=-1)
+        probs = log_probs.exp()
+        entropy = -(probs * log_probs).sum(dim=-1)
         
         import os
-        folder_path = f'/home/yangx/ReasoningPathCompression/observation/token_entropy/llama3_{self.config.method}'
+        model_family = getattr(self.config, "model_family", "llama3")
+        folder_path = f'/home/yangx/ReasoningPathCompression/observation/token_entropy/{model_family}_{self.config.method}'
         os.makedirs(folder_path, exist_ok=True)
         save_path = f'{folder_path}/entropy.pt'
 
         # Check if file exists and concatenate or create new
         if os.path.exists(save_path):
-            existing_entropy = torch.load(save_path)
+            existing_entropy = torch.load(save_path, map_location=entropy.device)
+            existing_entropy = existing_entropy.to(device=entropy.device, dtype=torch.float32)
             entropy = torch.cat([existing_entropy, entropy], dim=-1)
 
-        torch.save(entropy, save_path)
+        torch.save(entropy.float().cpu(), save_path)
 
     if hasattr(self.config, 'mode') and "confidence" in self.config.mode:
         import torch.nn.functional as F

@@ -17,7 +17,7 @@ fi
 
 # 根据模型类型设置路径
 case "$MODEL_TYPE" in
-    "llama")
+    "llama"|"llama3")
         # 如果提供了第二个参数作为压缩方法，使用它作为后缀
         if [ "$2" != "" ]; then
             TENSOR_PATH="token_entropy/llama3_$2/entropy.pt"
@@ -28,7 +28,7 @@ case "$MODEL_TYPE" in
         fi
         TOKENIZER_PATH="deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
         ;;
-    "qwen")
+    "qwen"|"qwen2")
         # 如果提供了第二个参数作为压缩方法，使用它作为后缀
         if [ "$2" != "" ]; then
             TENSOR_PATH="token_entropy/qwen2_$2/entropy.pt"
@@ -39,9 +39,29 @@ case "$MODEL_TYPE" in
         fi
         TOKENIZER_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
         ;;
+    "qwen3")
+        if [ "$2" != "" ]; then
+            TENSOR_PATH="token_entropy/qwen3_$2/entropy.pt"
+            OUTPUT_PATH="token_entropy/qwen3_$2/token_entropy.pdf"
+        else
+            TENSOR_PATH="token_entropy/qwen3/entropy.pt"
+            OUTPUT_PATH="token_entropy/qwen3/token_entropy.pdf"
+        fi
+        TOKENIZER_PATH="Qwen/Qwen3-30B-A3B"
+        ;;
+    "gpt"|"oss"|"gpt_oss")
+        if [ "$2" != "" ]; then
+            TENSOR_PATH="token_entropy/oss_$2/entropy.pt"
+            OUTPUT_PATH="token_entropy/oss_$2/token_entropy.pdf"
+        else
+            TENSOR_PATH="token_entropy/oss/entropy.pt"
+            OUTPUT_PATH="token_entropy/oss/token_entropy.pdf"
+        fi
+        TOKENIZER_PATH="openai/gpt-oss-20b"
+        ;;
     *)
         echo "错误: 不支持的模型类型 $MODEL_TYPE"
-        echo "支持的类型: llama, qwen, glm"
+        echo "支持的类型: llama, qwen/qwen2, qwen3, gpt/oss"
         exit 1
         ;;
 esac
