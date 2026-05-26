@@ -275,6 +275,13 @@ def Gpt_Oss_Ours_CausalLM_forward(
         self.step_confidences = []
         self.early_exit = False
         self.CoT_done = False
+        self.current_sentence_len = 0
+        self.current_sentence_entropy_sum = 0.0
+        self.active_step_len = 0
+        self.active_step_entropy_sum = 0.0
+        self.active_step_entropy = None
+        self.active_step_synced = False
+        self.pending_completed_step_lens = []
 
     # =============== Step-level Compression logic start ===============
     # assume non-batch input, shape: [1, logits_to_keep, vocab_size]
@@ -285,14 +292,9 @@ def Gpt_Oss_Ours_CausalLM_forward(
             predicted_token_ids[0].cpu().item() in self.CoT_done_token_ids
         )
 
-    # Apply softmax to get probabilities
-    probs = F.softmax(logits, dim=-1)
-    
-    # Calculate entropy: H = -sum(p * log(p))
-    # Add small epsilon to avoid log(0)
-    epsilon = 1e-8
-    log_probs = torch.log(probs + epsilon)
-    entropy = -torch.sum(probs * log_probs, dim=-1)
+    token_probs = F.softmax(logits[:, -1, :], dim=-1)
+    token_log_probs = torch.log(token_probs + 1e-8)
+    token_entropy = -torch.sum(token_probs * token_log_probs, dim=-1)
 
     # # Get top-k probabilities
     # k = getattr(self.config, 'topk_size', 20)  # Default to top-20 if not specified
@@ -305,34 +307,85 @@ def Gpt_Oss_Ours_CausalLM_forward(
 
     # print(f"Predicted Token ID: {predicted_token_ids[0].item()}, Entropy: {entropy.item():.4f}, Neg Mean Top-{k} Log Prob: {neg_mean_topk_log_prob.item():.4f}")
 
-    self.current_step_len += 1
-    # self.step_confidences.append(neg_mean_topk_log_prob.item())
+    if not hasattr(self, "current_sentence_len"):
+        self.current_sentence_len = 0
+        self.current_sentence_entropy_sum = 0.0
+        self.active_step_len = 0
+        self.active_step_entropy_sum = 0.0
+        self.active_step_entropy = None
+        self.active_step_synced = False
+        self.pending_completed_step_lens = []
 
-    if self.is_newline and not self.CoT_done and not self.early_exit and self.current_step_len >= self.model.layers[0].self_attn.kv_cluster.R:
-        for layer in self.model.layers:
-            layer.self_attn.step_lens.append(self.current_step_len)
-            layer.self_attn.is_new_step = True
-        
-        # Check if average confidence is below threshold for early exiting
-        # if len(self.step_confidences) > 0:
-        #     avg_confidence = sum(self.step_confidences) / len(self.step_confidences)
-        #     if avg_confidence < 8:
-        #         print("early exiting", avg_confidence)
-        #         self.early_exit = True
-        #     else:
-        #         self.step_confidences = []
-        if not self.early_exit:
+    if not self.CoT_done:
+        self.current_sentence_len += 1
+        self.current_sentence_entropy_sum += token_entropy[0].detach().float().item()
+        self.current_step_len = self.active_step_len + self.current_sentence_len
+        sentence_finalized = False
+        # self.step_confidences.append(neg_mean_topk_log_prob.item())
+
+        if predicted_token_ids[0].item() in self.newline_token_ids and self.current_sentence_len > 0:
+            sentence_finalized = True
+            sentence_len = self.current_sentence_len
+            sentence_entropy_sum = self.current_sentence_entropy_sum
+            sentence_entropy = sentence_entropy_sum / sentence_len
+            tau = getattr(self.config, "step_entropy_tau", 0.5)
+
+            if self.active_step_len == 0:
+                self.active_step_len = sentence_len
+                self.active_step_entropy_sum = sentence_entropy_sum
+                self.active_step_entropy = sentence_entropy
+                self.active_step_synced = False
+            elif abs(sentence_entropy - self.active_step_entropy) < tau:
+                self.active_step_len += sentence_len
+                self.active_step_entropy_sum += sentence_entropy_sum
+                self.active_step_entropy = self.active_step_entropy_sum / self.active_step_len
+            else:
+                if not self.active_step_synced:
+                    self.pending_completed_step_lens.append(self.active_step_len)
+                self.active_step_len = sentence_len
+                self.active_step_entropy_sum = sentence_entropy_sum
+                self.active_step_entropy = sentence_entropy
+                self.active_step_synced = False
+
+            self.current_sentence_len = 0
+            self.current_sentence_entropy_sum = 0.0
+            self.current_step_len = self.active_step_len
+
+        can_sync_step = (
+            sentence_finalized
+            and not self.early_exit
+            and self.active_step_len >= self.model.layers[0].self_attn.kv_cluster.R
+        )
+
+        if can_sync_step:
+            pending_completed_step_lens = self.pending_completed_step_lens
             for layer in self.model.layers:
-                layer.self_attn.cache_mode = "compression"
-        self.is_newline = False
-        self.current_step_len = 0
+                layer.self_attn.step_lens.extend(pending_completed_step_lens)
+
+                if self.active_step_synced:
+                    if len(layer.self_attn.step_lens) > 0:
+                        layer.self_attn.step_lens[-1] = self.active_step_len
+                    else:
+                        layer.self_attn.step_lens.append(self.active_step_len)
+                else:
+                    layer.self_attn.step_lens.append(self.active_step_len)
+
+                layer.self_attn.current_step_len = self.active_step_len
+                layer.self_attn.is_new_step = True
+                layer.self_attn.cache_mode = (
+                    "compression" if len(layer.self_attn.step_lens) > 1 else "vanilla"
+                )
+
+            self.pending_completed_step_lens = []
+            self.active_step_synced = True
+        else:
+            for layer in self.model.layers:
+                layer.self_attn.cache_mode = "vanilla"
+            self.is_newline = False
     else:
         for layer in self.model.layers:
             layer.self_attn.cache_mode = "vanilla"
         self.is_newline = False
-
-    if predicted_token_ids[0].item() in self.newline_token_ids:
-        self.is_newline = True
 
     # Set compression flag for all layers at once
     if self.CoT_done == True:
