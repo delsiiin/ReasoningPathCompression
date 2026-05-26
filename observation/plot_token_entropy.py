@@ -127,7 +127,41 @@ def build_step_stats(values, token_ids, newline_token_ids):
 
     if not stats:
         raise ValueError("未得到有效 step，无法绘图")
+    attach_step_deltas(stats)
     return stats
+
+
+def attach_step_deltas(stats):
+    prev_mean = None
+    for item in stats:
+        item["mean_delta"] = None if prev_mean is None else float(abs(item["mean"] - prev_mean))
+        prev_mean = item["mean"]
+    return stats
+
+
+def build_delta_buckets(stats, bucket_size=0.1):
+    if bucket_size <= 0:
+        raise ValueError("bucket_size 必须大于 0")
+
+    deltas = np.asarray(
+        [item["mean_delta"] for item in stats if item.get("mean_delta") is not None],
+        dtype=np.float64,
+    )
+    deltas = deltas[np.isfinite(deltas)]
+    if len(deltas) == 0:
+        return []
+
+    bucket_starts = np.floor(deltas / bucket_size) * bucket_size
+    unique_starts, counts = np.unique(bucket_starts, return_counts=True)
+    return [
+        {
+            "start": float(start),
+            "end": float(start + bucket_size),
+            "count": int(count),
+            "label": f"[{start:.3f}, {start + bucket_size:.3f})",
+        }
+        for start, count in zip(unique_starts, counts)
+    ]
 
 
 def add_step_stats(stats, values, start, end):
@@ -155,18 +189,39 @@ def print_step_stats(stats, values, verbose=False):
         print(f"值的范围: [{finite_values.min():.6f}, {finite_values.max():.6f}]")
         print(f"均值: {finite_values.mean():.6f}, 标准差: {finite_values.std():.6f}")
 
+    deltas = np.asarray(
+        [item["mean_delta"] for item in stats if item.get("mean_delta") is not None],
+        dtype=np.float64,
+    )
+    if len(deltas) > 0:
+        print(f"相邻step mean entropy绝对差值范围: [{deltas.min():.6f}, {deltas.max():.6f}]")
+        print(f"相邻step mean entropy绝对差值均值: {deltas.mean():.6f}, 标准差: {deltas.std():.6f}")
+
     if verbose:
         print("\n=== Step entropy统计 ===")
         for item in stats:
+            delta = item["mean_delta"]
+            delta_text = "n/a" if delta is None else f"{delta:.6f}"
             print(
                 f"step {item['step_id']}: token[{item['start']}:{item['end']}], "
                 f"mean={item['mean']:.6f}, max={item['max']:.6f}, "
-                f"min={item['min']:.6f}, std={item['std']:.6f}"
+                f"min={item['min']:.6f}, std={item['std']:.6f}, delta={delta_text}"
             )
         print("=" * 50)
 
 
-def plot_step_stats(stats, output_path=None, title=None):
+def print_delta_buckets(buckets):
+    if not buckets:
+        print("相邻step mean entropy差值bucket: 无")
+        return
+
+    print("\n=== 相邻step mean entropy绝对差值bucket频数 ===")
+    for bucket in buckets:
+        print(f"{bucket['label']}: {bucket['count']}")
+    print("=" * 50)
+
+
+def plot_step_stats(stats, output_path=None, title=None, bucket_size=0.1):
     import matplotlib.pyplot as plt
 
     step_ids = [item["step_id"] for item in stats]
@@ -177,16 +232,37 @@ def plot_step_stats(stats, output_path=None, title=None):
         ("std", "Std Entropy"),
     ]
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
     for ax, (metric, ylabel) in zip(axes.flat, metric_specs):
         y = [item[metric] for item in stats]
         ax.plot(step_ids, y, "o-", linewidth=1.4, markersize=3, alpha=0.85)
         ax.set_title(ylabel)
         ax.set_ylabel(ylabel)
+        ax.set_xlabel("Step ID")
         ax.grid(True, alpha=0.3)
 
-    axes[1, 0].set_xlabel("Step ID")
-    axes[1, 1].set_xlabel("Step ID")
+    delta_steps = [item["step_id"] for item in stats if item.get("mean_delta") is not None]
+    deltas = [item["mean_delta"] for item in stats if item.get("mean_delta") is not None]
+    delta_ax = axes[2, 0]
+    delta_ax.axhline(y=0, color="gray", linewidth=1, alpha=0.6)
+    delta_ax.plot(delta_steps, deltas, "o-", linewidth=1.4, markersize=3, alpha=0.85, color="#b6406b")
+    delta_ax.set_title("Adjacent Mean Entropy Absolute Delta")
+    delta_ax.set_xlabel("Step ID")
+    delta_ax.set_ylabel("|Δ| Mean Entropy")
+    delta_ax.grid(True, alpha=0.3)
+
+    bucket_ax = axes[2, 1]
+    buckets = build_delta_buckets(stats, bucket_size)
+    if buckets:
+        labels = [bucket["label"] for bucket in buckets]
+        counts = [bucket["count"] for bucket in buckets]
+        bucket_ax.bar(np.arange(len(buckets)), counts, color="#167a72", alpha=0.85)
+        bucket_ax.set_xticks(np.arange(len(buckets)))
+        bucket_ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    bucket_ax.set_title("Absolute Delta Bucket Frequency")
+    bucket_ax.set_xlabel(f"|Δ| Mean Entropy Bucket (width={bucket_size:g})")
+    bucket_ax.set_ylabel("Frequency")
+    bucket_ax.grid(True, axis="y", alpha=0.3)
 
     if title is None:
         title = "Token Entropy Step Statistics"
@@ -204,7 +280,8 @@ def plot_step_stats(stats, output_path=None, title=None):
 
 
 def plot_token_entropy(tensor_path, dict_key=None, bins=50, output_path=None, title=None,
-                       input_file=None, tokenizer_name=None, skip_answer=False, verbose=False):
+                       input_file=None, tokenizer_name=None, skip_answer=False, verbose=False,
+                       delta_bucket_size=0.1):
     """
     按 newline_token_ids 划分 step，并绘制每个 step 的 token entropy 统计。
     """
@@ -213,8 +290,10 @@ def plot_token_entropy(tensor_path, dict_key=None, bins=50, output_path=None, ti
     token_ids, newline_token_ids, _ = load_token_metadata(input_file, tokenizer_name)
     token_ids, values = maybe_truncate_answer(token_ids, values, tokenizer_name, skip_answer)
     stats = build_step_stats(values, token_ids, newline_token_ids)
+    buckets = build_delta_buckets(stats, delta_bucket_size)
     print_step_stats(stats, values, verbose)
-    plot_step_stats(stats, output_path, title)
+    print_delta_buckets(buckets)
+    plot_step_stats(stats, output_path, title, delta_bucket_size)
 
 
 def main():
@@ -287,6 +366,13 @@ def main():
     )
 
     parser.add_argument(
+        "--delta_bucket_size",
+        type=float,
+        default=0.1,
+        help="相邻step mean entropy绝对差值的bucket宽度 (默认: 0.1)"
+    )
+
+    parser.add_argument(
         "--no_paragraphs",
         action="store_true",
         help="保留兼容性；新图仍需要input_file中的token元数据"
@@ -304,7 +390,8 @@ def main():
             input_file=None if args.no_paragraphs else args.input_file,
             tokenizer_name=args.tokenizer_name,
             skip_answer=args.skip_answer,
-            verbose=args.verbose
+            verbose=args.verbose,
+            delta_bucket_size=args.delta_bucket_size
         )
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)

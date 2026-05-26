@@ -9,6 +9,7 @@ from datetime import datetime
 import numpy as np
 
 from plot_token_entropy import (
+    build_delta_buckets,
     build_step_stats,
     find_subsequence,
     load_entropy_values,
@@ -155,8 +156,14 @@ def make_payload(stats, values, token_ids, record, args, notes):
         "entropy_max": float(finite_values.max()) if len(finite_values) else None,
         "entropy_mean": float(finite_values.mean()) if len(finite_values) else None,
         "entropy_std": float(finite_values.std()) if len(finite_values) else None,
+        "delta_bucket_size": args.delta_bucket_size,
     }
-    return {"summary": summary, "notes": notes, "steps": stats}
+    return {
+        "summary": summary,
+        "notes": notes,
+        "steps": stats,
+        "delta_buckets": build_delta_buckets(stats, args.delta_bucket_size),
+    }
 
 
 def json_for_html(payload):
@@ -268,6 +275,12 @@ def build_html(payload):
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
       padding: 14px;
+    }}
+    .delta-charts {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 0 14px 14px;
     }}
     .chart {{
       min-height: 190px;
@@ -422,6 +435,7 @@ def build_html(payload):
         </div>
         <div id="notes"></div>
         <div class="charts" id="charts"></div>
+        <div class="delta-charts" id="delta-charts"></div>
       </div>
       <div class="panel">
         <div class="toolbar">
@@ -435,6 +449,7 @@ def build_html(payload):
                 <th data-sort="start">Range</th>
                 <th data-sort="token_count">Tokens</th>
                 <th data-sort="mean">Mean</th>
+                <th data-sort="mean_delta">|Δ| Mean</th>
                 <th data-sort="max">Max</th>
                 <th data-sort="min">Min</th>
                 <th data-sort="std">Std</th>
@@ -514,10 +529,28 @@ def build_html(payload):
       const charts = document.getElementById('charts');
       if (!rows.length) {{
         charts.innerHTML = '<div class="empty">No matching steps</div>';
+        document.getElementById('delta-charts').innerHTML = '';
         return;
       }}
       charts.innerHTML = metrics.map(([key, label, color]) => chartSvg(rows, key, label, color)).join('');
       charts.querySelectorAll('[data-step]').forEach(el => {{
+        el.addEventListener('click', () => selectStep(Number(el.dataset.step)));
+      }});
+      renderDeltaCharts(rows);
+    }}
+
+    function renderDeltaCharts(rows) {{
+      const deltaRows = rows.filter(row => Number.isFinite(row.mean_delta));
+      const deltaCharts = document.getElementById('delta-charts');
+      if (!deltaRows.length) {{
+        deltaCharts.innerHTML = '';
+        return;
+      }}
+      deltaCharts.innerHTML = [
+        chartSvg(deltaRows, 'mean_delta', 'Adjacent Mean Entropy Absolute Delta', '#b6406b'),
+        histogramSvg(bucketDeltas(deltaRows), 'Absolute Delta Bucket Frequency', '#167a72'),
+      ].join('');
+      deltaCharts.querySelectorAll('[data-step]').forEach(el => {{
         el.addEventListener('click', () => selectStep(Number(el.dataset.step)));
       }});
     }}
@@ -547,6 +580,43 @@ def build_html(payload):
       </div>`;
     }}
 
+    function bucketDeltas(rows) {{
+      const width = payload.summary.delta_bucket_size || 0.1;
+      const buckets = new Map();
+      rows.forEach(row => {{
+        if (!Number.isFinite(row.mean_delta)) return;
+        const start = Math.floor(row.mean_delta / width) * width;
+        const key = start.toFixed(12);
+        if (!buckets.has(key)) buckets.set(key, {{ start, end: start + width, count: 0 }});
+        buckets.get(key).count += 1;
+      }});
+      return Array.from(buckets.values()).sort((a, b) => a.start - b.start);
+    }}
+
+    function histogramSvg(buckets, label, color) {{
+      const width = 520, height = 145, pad = 28;
+      if (!buckets.length) {{
+        return `<div class="chart"><div class="chart-title"><span>${{esc(label)}}</span></div><div class="empty">No deltas</div></div>`;
+      }}
+      const maxCount = Math.max(...buckets.map(bucket => bucket.count));
+      const barWidth = (width - pad * 2) / buckets.length;
+      const bars = buckets.map((bucket, idx) => {{
+        const barHeight = (bucket.count / Math.max(1, maxCount)) * (height - pad * 2);
+        const x = pad + idx * barWidth + 2;
+        const y = height - pad - barHeight;
+        const w = Math.max(1, barWidth - 4);
+        return `<rect x="${{x.toFixed(2)}}" y="${{y.toFixed(2)}}" width="${{w.toFixed(2)}}" height="${{barHeight.toFixed(2)}}" fill="${{color}}" opacity="0.85"><title>[${{bucket.start.toFixed(3)}}, ${{bucket.end.toFixed(3)}}): ${{bucket.count}}</title></rect>`;
+      }}).join('');
+      return `<div class="chart">
+        <div class="chart-title"><span>${{esc(label)}}</span><small>bucket width=${{fmt(payload.summary.delta_bucket_size)}}</small></div>
+        <svg viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="${{esc(label)}}">
+          <line class="axis" x1="${{pad}}" y1="${{height-pad}}" x2="${{width-pad}}" y2="${{height-pad}}"></line>
+          <line class="axis" x1="${{pad}}" y1="${{pad}}" x2="${{pad}}" y2="${{height-pad}}"></line>
+          ${{bars}}
+        </svg>
+      </div>`;
+    }}
+
     function renderTable(rows) {{
       document.getElementById('filter-count').textContent = `${{rows.length}} / ${{payload.steps.length}} steps`;
       document.getElementById('rows').innerHTML = rows.map(step => `
@@ -555,6 +625,7 @@ def build_html(payload):
           <td>${{step.start}}:${{step.end}}</td>
           <td>${{step.token_count}}</td>
           <td>${{fmt(step.mean)}}</td>
+          <td>${{fmt(step.mean_delta)}}</td>
           <td>${{fmt(step.max)}}</td>
           <td>${{fmt(step.min)}}</td>
           <td>${{fmt(step.std)}}</td>
@@ -573,6 +644,7 @@ def build_html(payload):
         ['Range', `${{step.start}}:${{step.end}}`],
         ['Tokens', step.token_count],
         ['Mean / Std', `${{fmt(step.mean)}} / ${{fmt(step.std)}}`],
+        ['|Δ| Mean', fmt(step.mean_delta)],
         ['Min / Max', `${{fmt(step.min)}} / ${{fmt(step.max)}}`],
       ].map(([label, value]) => `<div class="meta-item">${{esc(label)}}<strong>${{esc(value)}}</strong></div>`).join('');
       document.getElementById('step-text').textContent = step.text || '';
@@ -689,6 +761,7 @@ def main():
     parser.add_argument("--tokenizer_name", "-t", default=None)
     parser.add_argument("--dict-key", help="如果 tensor_path 保存的是字典，指定取值键名")
     parser.add_argument("--skip_answer", action="store_true", help="遇到 </think> 后截断 answer 部分")
+    parser.add_argument("--delta_bucket_size", type=float, default=0.1, help="相邻step mean entropy绝对差值的bucket宽度")
     parser.add_argument("--serve", action="store_true", help="生成后启动本地 HTTP 服务")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP 服务监听地址")
     parser.add_argument("--port", type=int, default=8765, help="HTTP 服务端口")
