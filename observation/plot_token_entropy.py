@@ -9,6 +9,24 @@ from transformers import AutoTokenizer
 
 
 THOUGHT_DELTA_THRESHOLD = 0.05
+MEAN_ENTROPY_COLOR = "darkgray"
+THOUGHT_CATEGORY_COLORS = {
+    "Progressive": "#a2aadb",
+    "Backtracing": "#8eaedf",
+    "Reflection": "#f4b484",
+}
+HARDCODED_THOUGHT_CATEGORIES = (
+    "Progressive",
+    "Reflection",
+    "Backtracing",
+    "Backtracing",
+    "Progressive",
+    "Reflection",
+    "Reflection",
+    "Backtracing",
+    "Progressive",
+)
+FALLBACK_THOUGHT_CATEGORIES = ("Progressive", "Backtracing", "Reflection")
 
 
 def load_entropy_values(tensor_path, dict_key=None):
@@ -398,9 +416,17 @@ def select_visible_thoughts(thoughts, start_step, end_step):
     return visible_thoughts
 
 
+def get_thought_category(thought_id):
+    """返回 Thought 色块使用的固定类别。"""
+    if thought_id < len(HARDCODED_THOUGHT_CATEGORIES):
+        return HARDCODED_THOUGHT_CATEGORIES[thought_id]
+    return FALLBACK_THOUGHT_CATEGORIES[thought_id % len(FALLBACK_THOUGHT_CATEGORIES)]
+
+
 def plot_mean_entropy(stats, step_range=None, output_path=None, title=None):
     """绘制指定 step 闭区间内按 thought 分段的 mean entropy。"""
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
 
     selected, start_step, end_step = select_step_range(stats, step_range)
     thoughts = select_visible_thoughts(
@@ -414,13 +440,21 @@ def plot_mean_entropy(stats, step_range=None, output_path=None, title=None):
         sharex=True,
         gridspec_kw={"height_ratios": [7, 1], "hspace": 0.06},
     )
-    strip_colors = plt.get_cmap("Pastel2").colors
     display_offset = selected[0]["step_id"]
     step_ids = [item["step_id"] - display_offset for item in selected]
     means = [item["mean"] for item in selected]
     smooth_step_ids, smooth_means = build_smooth_curve(step_ids, means)
-    ax.plot(smooth_step_ids, smooth_means, linewidth=1.5, alpha=0.9, color="#167a72")
-    ax.scatter(step_ids, means, s=18, alpha=0.9, color="#167a72", zorder=3)
+    marker_interval = 20 if len(step_ids) >= 3 else 1
+    ax.plot(
+        smooth_step_ids,
+        smooth_means,
+        linewidth=1.5,
+        alpha=0.9,
+        color=MEAN_ENTROPY_COLOR,
+        marker="o",
+        markersize=4.5,
+        markevery=marker_interval,
+    )
 
     for thought in thoughts[1:]:
         boundary = thought["start_step"] - display_offset - 0.5
@@ -430,7 +464,8 @@ def plot_mean_entropy(stats, step_range=None, output_path=None, title=None):
         start = thought["start_step"] - display_offset
         end = thought["end_step"] - display_offset
         step_count = end - start + 1
-        color = strip_colors[thought["thought_id"] % len(strip_colors)]
+        category = get_thought_category(thought["thought_id"])
+        color = THOUGHT_CATEGORY_COLORS[category]
         strip_ax.barh(
             0.5,
             step_count,
@@ -453,6 +488,15 @@ def plot_mean_entropy(stats, step_range=None, output_path=None, title=None):
 
     ax.set_ylabel("Mean Entropy")
     ax.grid(True, alpha=0.3)
+    ax.legend(
+        handles=[
+            Patch(facecolor=color, edgecolor="none", label=category)
+            for category, color in THOUGHT_CATEGORY_COLORS.items()
+        ],
+        loc="upper right",
+        frameon=True,
+        fontsize=9,
+    )
     ax.set_xlim(-0.5, len(selected) - 0.5)
     strip_ax.set_ylim(0, 1)
     strip_ax.set_yticks([])
