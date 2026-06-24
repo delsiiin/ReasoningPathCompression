@@ -8,6 +8,9 @@ import torch
 from transformers import AutoTokenizer
 
 
+THOUGHT_DELTA_THRESHOLD = 0.05
+
+
 def load_entropy_values(tensor_path, dict_key=None):
     if not os.path.exists(tensor_path):
         raise FileNotFoundError(f"张量文件不存在: {tensor_path}")
@@ -279,9 +282,200 @@ def plot_step_stats(stats, output_path=None, title=None, bucket_size=0.1):
         plt.show()
 
 
+def select_step_range(stats, step_range=None):
+    """返回闭区间 ``[start_step, end_step]`` 内的 step 统计。"""
+    if not stats:
+        raise ValueError("没有可用于绘制 mean entropy 的 step")
+
+    first_step = stats[0]["step_id"]
+    last_step = stats[-1]["step_id"]
+    if step_range is None:
+        start_step, end_step = first_step, last_step
+    else:
+        start_step, end_step = step_range
+        if start_step > end_step:
+            raise ValueError("mean entropy 的 step 区间起点不能大于终点")
+        if start_step < first_step or end_step > last_step:
+            raise ValueError(
+                f"mean entropy 的 step 区间必须位于 [{first_step}, {last_step}]，"
+                f"当前为 [{start_step}, {end_step}]"
+            )
+
+    selected = [
+        item for item in stats
+        if start_step <= item["step_id"] <= end_step
+    ]
+    if not selected:
+        raise ValueError("指定的 mean entropy step 区间没有有效数据")
+    return selected, start_step, end_step
+
+
+def default_mean_entropy_output_path(output_path, start_step, end_step):
+    """在主图旁生成 mean entropy 图的默认输出路径。"""
+    if not output_path:
+        return None
+
+    root, ext = os.path.splitext(output_path)
+    if not ext:
+        ext = ".png"
+    return f"{root}_mean_entropy_steps_{start_step}-{end_step}{ext}"
+
+
+def build_smooth_curve(x_values, y_values, points_per_interval=20):
+    """用三次 Hermite 插值生成经过所有数据点的平滑曲线。"""
+    x_values = np.asarray(x_values, dtype=np.float64)
+    y_values = np.asarray(y_values, dtype=np.float64)
+    if len(x_values) < 3:
+        return x_values, y_values
+
+    slopes = np.gradient(y_values, x_values)
+    smooth_x = []
+    smooth_y = []
+    for idx in range(len(x_values) - 1):
+        x0, x1 = x_values[idx], x_values[idx + 1]
+        y0, y1 = y_values[idx], y_values[idx + 1]
+        interval = x1 - x0
+        t = np.linspace(0, 1, points_per_interval, endpoint=False)
+        h00 = 2 * t**3 - 3 * t**2 + 1
+        h10 = t**3 - 2 * t**2 + t
+        h01 = -2 * t**3 + 3 * t**2
+        h11 = t**3 - t**2
+        smooth_x.extend(x0 + t * interval)
+        smooth_y.extend(h00 * y0 + h10 * interval * slopes[idx] +
+                        h01 * y1 + h11 * interval * slopes[idx + 1])
+
+    smooth_x.append(x_values[-1])
+    smooth_y.append(y_values[-1])
+    return np.asarray(smooth_x), np.asarray(smooth_y)
+
+
+def build_thought_groups(stats, delta_threshold=THOUGHT_DELTA_THRESHOLD):
+    """按相邻 step 的 mean entropy 绝对差值划分连续 thought。"""
+    if not stats:
+        return []
+
+    thoughts = []
+    current_steps = [stats[0]]
+    previous_mean = stats[0]["mean"]
+    for item in stats[1:]:
+        if abs(item["mean"] - previous_mean) >= delta_threshold:
+            thoughts.append({
+                "thought_id": len(thoughts),
+                "start_step": current_steps[0]["step_id"],
+                "end_step": current_steps[-1]["step_id"],
+                "steps": current_steps,
+            })
+            current_steps = [item]
+        else:
+            current_steps.append(item)
+        previous_mean = item["mean"]
+
+    thoughts.append({
+        "thought_id": len(thoughts),
+        "start_step": current_steps[0]["step_id"],
+        "end_step": current_steps[-1]["step_id"],
+        "steps": current_steps,
+    })
+    return thoughts
+
+
+def select_visible_thoughts(thoughts, start_step, end_step):
+    """裁剪到目标区间，并将可见 thought 从 T0 重新编号。"""
+    visible_thoughts = []
+    for thought in thoughts:
+        visible_steps = [
+            item for item in thought["steps"]
+            if start_step <= item["step_id"] <= end_step
+        ]
+        if visible_steps:
+            visible_thoughts.append({
+                **thought,
+                "thought_id": len(visible_thoughts),
+                "start_step": visible_steps[0]["step_id"],
+                "end_step": visible_steps[-1]["step_id"],
+                "steps": visible_steps,
+            })
+    return visible_thoughts
+
+
+def plot_mean_entropy(stats, step_range=None, output_path=None, title=None):
+    """绘制指定 step 闭区间内按 thought 分段的 mean entropy。"""
+    import matplotlib.pyplot as plt
+
+    selected, start_step, end_step = select_step_range(stats, step_range)
+    thoughts = select_visible_thoughts(
+        build_thought_groups(stats), start_step, end_step
+    )
+
+    fig, (ax, strip_ax) = plt.subplots(
+        2,
+        1,
+        figsize=(12, 6.8),
+        sharex=True,
+        gridspec_kw={"height_ratios": [7, 1], "hspace": 0.06},
+    )
+    strip_colors = plt.get_cmap("Pastel2").colors
+    display_offset = selected[0]["step_id"]
+    step_ids = [item["step_id"] - display_offset for item in selected]
+    means = [item["mean"] for item in selected]
+    smooth_step_ids, smooth_means = build_smooth_curve(step_ids, means)
+    ax.plot(smooth_step_ids, smooth_means, linewidth=1.5, alpha=0.9, color="#167a72")
+    ax.scatter(step_ids, means, s=18, alpha=0.9, color="#167a72", zorder=3)
+
+    for thought in thoughts[1:]:
+        boundary = thought["start_step"] - display_offset - 0.5
+        ax.axvline(boundary, color="#6b7280", linestyle="--", linewidth=0.9, alpha=0.7)
+
+    for thought in thoughts:
+        start = thought["start_step"] - display_offset
+        end = thought["end_step"] - display_offset
+        step_count = end - start + 1
+        color = strip_colors[thought["thought_id"] % len(strip_colors)]
+        strip_ax.barh(
+            0.5,
+            step_count,
+            left=start - 0.5,
+            height=1,
+            color=color,
+            edgecolor="white",
+            linewidth=1,
+        )
+        label = f"T{thought['thought_id']}"
+        strip_ax.text(
+            (start + end) / 2,
+            0.5,
+            label,
+            ha="center",
+            va="center",
+            fontsize=8,
+            clip_on=True,
+        )
+
+    ax.set_ylabel("Mean Entropy")
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-0.5, len(selected) - 0.5)
+    strip_ax.set_ylim(0, 1)
+    strip_ax.set_yticks([])
+    strip_ax.set_ylabel("Thought", labelpad=18)
+    strip_ax.set_xlabel("Step ID")
+    strip_ax.spines[["top", "right", "left"]].set_visible(False)
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.92, bottom=0.11)
+
+    if output_path:
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+        print(f"Mean entropy图片已保存到: {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
 def plot_token_entropy(tensor_path, dict_key=None, bins=50, output_path=None, title=None,
                        input_file=None, tokenizer_name=None, skip_answer=False, verbose=False,
-                       delta_bucket_size=0.1):
+                       delta_bucket_size=0.1, mean_entropy_step_range=None,
+                       mean_entropy_output_path=None):
     """
     按 newline_token_ids 划分 step，并绘制每个 step 的 token entropy 统计。
     """
@@ -295,6 +489,18 @@ def plot_token_entropy(tensor_path, dict_key=None, bins=50, output_path=None, ti
     print_delta_buckets(buckets)
     plot_step_stats(stats, output_path, title, delta_bucket_size)
 
+    _, start_step, end_step = select_step_range(stats, mean_entropy_step_range)
+    if mean_entropy_output_path is None:
+        mean_entropy_output_path = default_mean_entropy_output_path(
+            output_path, start_step, end_step
+        )
+    plot_mean_entropy(
+        stats,
+        step_range=(start_step, end_step),
+        output_path=mean_entropy_output_path,
+        title=None if title is None else f"{title} - Mean Entropy",
+    )
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -307,6 +513,7 @@ def main():
   python plot_token_entropy.py --tensor_path tensor.pt --output entropy_plot.png
   python plot_token_entropy.py --tensor_path tensor.pt --input_file output.jsonl --tokenizer_name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   python plot_token_entropy.py --tensor_path token_entropy/qwen3/entropy.pt --input_file output.jsonl --tokenizer_name Qwen/Qwen3-30B-A3B
+  python plot_token_entropy.py --tensor_path tensor.pt --mean_entropy_step_range 20 80
         """
     )
 
@@ -373,6 +580,25 @@ def main():
     )
 
     parser.add_argument(
+        "--mean_entropy_step_range", "--mean-entropy-step-range",
+        nargs=2,
+        type=int,
+        metavar=("START_STEP", "END_STEP"),
+        help=(
+            "额外 mean entropy 图要截取的原始 step 闭区间（原图 step 从 1 开始）；"
+            "额外图会从 0 重新显示"
+        )
+    )
+
+    parser.add_argument(
+        "--mean_entropy_output", "--mean-entropy-output",
+        help=(
+            "额外 mean entropy 图的输出路径；默认在 --output 同目录生成 "
+            "<文件名>_mean_entropy_steps_<起点>-<终点>.<扩展名>"
+        )
+    )
+
+    parser.add_argument(
         "--no_paragraphs",
         action="store_true",
         help="保留兼容性；新图仍需要input_file中的token元数据"
@@ -391,7 +617,9 @@ def main():
             tokenizer_name=args.tokenizer_name,
             skip_answer=args.skip_answer,
             verbose=args.verbose,
-            delta_bucket_size=args.delta_bucket_size
+            delta_bucket_size=args.delta_bucket_size,
+            mean_entropy_step_range=args.mean_entropy_step_range,
+            mean_entropy_output_path=args.mean_entropy_output,
         )
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
