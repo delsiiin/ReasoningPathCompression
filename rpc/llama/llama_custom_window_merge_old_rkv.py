@@ -292,7 +292,7 @@ def Llama_Ours_CausalLM_forward(
                 sentence_len = self.current_sentence_len
                 sentence_entropy_sum = self.current_sentence_entropy_sum
                 sentence_entropy = sentence_entropy_sum / sentence_len
-                tau = getattr(self.config, "step_entropy_tau", 0.15)
+                tau = getattr(self.config, "step_entropy_tau", 0.05)
 
                 if self.active_step_len == 0:
                     self.active_step_len = sentence_len
